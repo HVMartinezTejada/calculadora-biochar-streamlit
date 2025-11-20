@@ -18,13 +18,21 @@ Aparecerán dos deslizadores (sliders):
 
 pH del Suelo: Mueve este control entre 4.0 (muy ácido) y 9.0 (muy alcalino).
 
-Materia Orgánica (%): Mueve este control entre 1.0% y 5.0%.
+Materia Orgánica (%): Mueve este control entre 1.0% y 5.0%. [ElegÍ el rango $1.0\%-5.0\%$ para que el prototipo refleje las condiciones más frecuentes de los suelos agrícolas y para prevenir errores de predicción por intentar extrapolar a condiciones extremas (como desiertos o turberas).]
 
 Acción: Mueve ambos deslizadores lentamente.
 
 Resultado: El valor en "Dosis Sugerida (Simulada)" cambiará inmediatamente.
 
 Observación Clave: Nota cómo la dosis aumenta si el pH es bajo y la Materia Orgánica es baja. Esto refleja la hipótesis básica que el modelo sintético está aprendiendo.
+NOTA Base Agronómica (Rango Típico)
+El rango $1\%-5\%$ representa la mayoría de los suelos agrícolas de labranza media a alta en climas templados y tropicales, que son los que típicamente se buscan mejorar con biocarbón.Menos de $1\%$: Se considera un suelo muy pobre, típicamente arenoso o muy degradado. Aunque existen, no son el rango central de la agricultura productiva.Más de $5\%$: Estos son suelos con un contenido orgánico excepcionalmente alto, como los suelos de turba o Mollisoles (suelos oscuros y ricos). En estos casos, la necesidad de agregar enmiendas como el biocarbón para mejorar la fertilidad suele ser menor.Establecer un rango central y realista como $1.0\%-5.0\%$ garantiza que el modelo sintético se centre en el escenario más común de toma de decisiones en la agricultura.
+Es fundamental entender los rangos de entrada para que el modelo sea realista.La razón por la que en el Modo Simulación establecimos el rango de la Materia Orgánica (MO) entre $1.0\%$ y $5.0\%$ tiene tres bases principales: ecológica, agronómica y de modelado.1. Base Agronómica (Rango Típico). El rango $1\%-5\%$ representa la mayoría de los suelos agrícolas de labranza media a alta en climas templados y tropicales, que son los que típicamente se buscan mejorar con biocarbón.Menos de $1\%$: Se considera un suelo muy pobre, típicamente arenoso o muy degradado. Aunque existen, no son el rango central de la agricultura productiva.Más de $5\%$: Estos son suelos con un contenido orgánico excepcionalmente alto, como los suelos de turba o Mollisoles (suelos oscuros y ricos). En estos casos, la necesidad de agregar enmiendas como el biocarbón para mejorar la fertilidad suele ser menor.Establecer un rango central y realista como $1.0\%-5.0\%$ garantiza que el modelo sintético se centre en el escenario más común de toma de decisiones en la agricultura.2. Base del Modelado (Evitar Extrapolación Extrema). En el aprendizaje automático, especialmente cuando se trabaja con datos sintéticos o limitados (como en la Pestaña 2 cuando subas pocos datos), es crucial evitar que el usuario ingrese valores que el modelo nunca ha visto o que se encuentran muy lejos del rango de entrenamiento.
+
+Riesgo de Extrapolación: Si el modelo solo ha sido entrenado con datos entre $1\%$ y $5\%$, y un usuario ingresa $15\%$ (un valor de turbera), la predicción de la dosis de Biochar será una extrapolación y es probable que sea muy inexacta o incluso ridícula.Propósito del Slider: El deslizador restringe la entrada a un dominio razonable para proteger al modelo y al usuario de obtener resultados sin sentido.
+
+Conexión con el Concepto de Biochar:
+El biocarbón se utiliza principalmente en suelos que presentan algún tipo de limitación. Si un suelo tiene un $1.0\%$ de MO, es un suelo con baja capacidad de retención de agua y nutrientes, por lo que la adición de Biochar es muy relevante.Si un suelo tiene un $5.0\%$ de MO, sus propiedades físicas y químicas ya son muy buenas. Aunque el Biochar puede mejorar aspectos como la adsorción de metales pesados, la necesidad de agregar grandes cantidades para mejorar la fertilidad general disminuye.
 
 2. Pestaña "📂 Carga tus Datos Reales" (Uso Científico)
 Esta es la pestaña crucial que convierte la demo en una herramienta científica real para tu investigación. Aquí es donde le entregas los resultados de tus experimentos para que XGBoost aprenda tus patrones únicos.
@@ -151,3 +159,4 @@ with tab2:
             pred_real = st.session_state['model_real'].predict(pd.DataFrame([[r_ph, r_mo]], columns=['ph', 'mo']))[0]
 
             st.success(f"Dosis calculada: {pred_real:.2f} Ton/Ha")
+
