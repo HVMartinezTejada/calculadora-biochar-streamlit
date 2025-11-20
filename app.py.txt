@@ -1,3 +1,66 @@
+EXPLICACIÓN:
+He creado lo siguiente
+1. Pestaña "🤖 Modo Simulación" (Demo)
+Esta pestaña está diseñada para mostrarte cómo funciona el algoritmo XGBoost sin necesidad de datos reales. Su principal función es la demostración y la prueba de la interfaz.
+
+Cómo usarla:
+Generar el Modelo:
+
+Verás un botón que dice "Generar Modelo de Simulación".
+
+Acción: Haz clic en este botón.
+
+Resultado: El servidor de Streamlit generará 500 filas de datos sintéticos (inventados con la lógica de que un suelo más pobre necesita más Biochar) y entrenará el modelo XGBoost con ellos. Verás un mensaje verde de éxito.
+
+Interactuar con los Parámetros:
+
+Aparecerán dos deslizadores (sliders):
+
+pH del Suelo: Mueve este control entre 4.0 (muy ácido) y 9.0 (muy alcalino).
+
+Materia Orgánica (%): Mueve este control entre 1.0% y 5.0%.
+
+Acción: Mueve ambos deslizadores lentamente.
+
+Resultado: El valor en "Dosis Sugerida (Simulada)" cambiará inmediatamente.
+
+Observación Clave: Nota cómo la dosis aumenta si el pH es bajo y la Materia Orgánica es baja. Esto refleja la hipótesis básica que el modelo sintético está aprendiendo.
+
+2. Pestaña "📂 Carga tus Datos Reales" (Uso Científico)
+Esta es la pestaña crucial que convierte la demo en una herramienta científica real para tu investigación. Aquí es donde le entregas los resultados de tus experimentos para que XGBoost aprenda tus patrones únicos.
+
+Requisito: El Archivo CSV
+Antes de usar esta pestaña, necesitas tener un archivo de datos. Crea una hoja de cálculo (Excel, Google Sheets, etc.) con los siguientes tres encabezados (columnas) y guarda el archivo en formato CSV (Valores Separados por Coma):
+ph: El pH medido del suelo.
+
+mo: El porcentaje de materia orgánica del suelo.
+
+dosis_efectiva: La cantidad de Biochar (en Ton/Ha) que se usó en ese experimento y que resultó en el mejoramiento que buscas (p. ej., máxima fertilidad o máxima adsorción, según el objetivo de tu estudio).
+
+Cómo usarla:
+Subir el Archivo:
+
+Haz clic en el botón "Sube tu archivo CSV".
+
+Acción: Sube el archivo CSV que contiene tus datos reales de suelo.
+
+Entrenar el Modelo:
+
+Haz clic en el botón "Entrenar XGBoost con mis datos".
+
+Acción: El servidor lee tus datos, los divide y entrena un nuevo modelo XGBoost único para tus condiciones.
+
+Resultado: Verás un mensaje de éxito con un valor de Precisión (R2). Cuanto más cerca esté este número de 1.0, mejor ha aprendido el modelo tus datos.
+
+Hacer Predicciones Reales:
+
+Una vez entrenado, aparecerán dos cuadros de entrada: "Ingresa pH real" e "Ingresa MO real".
+
+Acción: Introduce los valores actuales del suelo que deseas mejorar.
+
+Resultado: Haz clic en "Calcular (Modelo Real)" y obtendrás la dosis de Biochar recomendada, basada enteramente en la experiencia histórica de tus propios datos.
+
+
 import streamlit as st
 import pandas as pd
 import xgboost as xgb
@@ -86,4 +149,5 @@ with tab2:
         
         if st.button("Calcular (Modelo Real)"):
             pred_real = st.session_state['model_real'].predict(pd.DataFrame([[r_ph, r_mo]], columns=['ph', 'mo']))[0]
+
             st.success(f"Dosis calculada: {pred_real:.2f} Ton/Ha")
