@@ -121,7 +121,7 @@ with tab2:
             if not all(col in df_real.columns for col in required_cols):
                 st.error("Error: Asegúrate de que el CSV contenga las columnas 'ph', 'mo', y 'dosis_efectiva'.")
             
-            elif st.button("🚀 Entrenar y Actualizar Modelo Maestro"):
+            elif st.button("🏋️🏃‍➡️ Entrenar y Actualizar Modelo Maestro"):
                 # 1. Definir X e y
                 X = df_real[['ph', 'mo']]
                 y = df_real['dosis_efectiva']
@@ -150,6 +150,7 @@ with tab2:
             st.error("Error: Asegúrate de que tu archivo CSV contenga las columnas 'ph', 'mo', y 'dosis_efectiva'.")
         except Exception as e:
             st.error(f"Error desconocido durante la carga/entrenamiento: {e}. Revisa el formato y el delimitador (';').")
+
 
 
 
