@@ -6,13 +6,23 @@ import numpy as np
 # Configuración
 st.set_page_config(page_title="Calculadora Biochar", layout="wide")
 
-st.title("🧪 Prescriptor Edafológico")
+# 1. Definir dos columnas: 1 parte para el logo (pequeño), 4 partes para el título (grande).
+col_logo, col_titulo = st.columns([1, 4]) 
+
+# 2. Colocar el Logo en la columna izquierda
+with col_logo:
+    # Asegúrate de que el nombre del archivo coincida exactamente
+    st.image("logonanomof.png", width=75) 
+
+# 3. Colocar el Título en la columna derecha
+with col_titulo:
+    st.title("🧪 Prescriptor Edafológico")
 st.markdown("""
-*NanomofXGBoost*©️ Created by: HV Martínez-Tejada **Nanomof 2025**.
+*NanomofXGBoost*©️ Created by: HV Martínez-Tejada. **Nanomof 2025**.
 """)
 
 # Creamos pestañas
-tab1, tab2 = st.tabs(["🤖 Dosificación", "📂 Datos Proyecto de Servicios B2B"])
+tab1, tab2 = st.tabs(["🤖 Simulación", "📂 Proyecto de Servicios B2B"])
 
 # --- PESTAÑA 1: SIMULACIÓN ---
 with tab1:
@@ -87,5 +97,6 @@ with tab2:
             pred_real = st.session_state['model_real'].predict(pd.DataFrame([[r_ph, r_mo]], columns=['ph', 'mo']))[0]
 
             st.success(f"Dosis calculada: {pred_real:.2f} Ton/Ha")
+
 
 
