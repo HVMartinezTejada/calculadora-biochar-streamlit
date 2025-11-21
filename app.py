@@ -18,7 +18,7 @@ with col_titulo:
 # 3. Colocar el Logo en la segunda columna (derecha)
 with col_logo:
     # CORRECCIÓN CLAVE: Reducimos el ancho a un valor funcional (120px)
-    st.image("logonanomof.png", width=120) 
+    st.image("logonanomof.png", width=500) 
 
 # El contenido descriptivo (Introducción)
    # Nota al pie (Footer): Se mueve fuera de las columnas para que ocupe todo el ancho
@@ -105,6 +105,7 @@ with tab2:
             pred_real = st.session_state['model_real'].predict(pd.DataFrame([[r_ph, r_mo]], columns=['ph', 'mo']))[0]
 
             st.success(f"Dosis calculada: {pred_real:.2f} Ton/Ha")
+
 
 
 
