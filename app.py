@@ -47,28 +47,6 @@ with col_logo:
     # Manteniendo el width=500 solicitado por el usuario
     st.image("logonanomof.png", width=500) 
 
-# Footer
-st.markdown("---") 
-st.markdown(
-    """
-    *NanomofXGBoost*©️ Created by: HV Martínez-Tejada. **NanoMof 2025**.
-    """
-)
-# --- NUEVA SECCIÓN: CREDIBILIDAD TÉCNICA ---
-st.markdown("---")
-st.markdown(
-    """
-    <div style='text-align: center; font-size: 0.9em; color: #666; margin-top: 20px;'>
-    <i>Nuestro <b>Prescriptor Edafológico</b> está utilizando la herramienta más robusta disponible en Python 
-    para resolver problemas no lineales de dosificación de enmiendas, basada en XGBoost (Extreme Gradient Boosting) 
-    desarrollada por la comunidad y documentada en https://xgboost.ai/ . Nanomof 2025 (C)</i>
-    </div>
-    """, 
-    unsafe_allow_html=True
-)
-# --- FIN DE AJUSTES ESTÉTICOS ---
-
-
 # Creamos pestañas
 tab1, tab2 = st.tabs(["🤖 Simulación Servicios B2B", "📂 Entrenamiento"])
 
@@ -169,9 +147,21 @@ st.markdown(
     *NanomofXGBoost*©️ Created by: HV Martínez-Tejada. **NanoMof 2025**.
     
     ***
-    Nuestro *Prescriptor Edafológico* está utilizando la herramienta más robusta disponible en Python para resolver problemas no lineales de dosificación de enmiendas, basada en **XGBoost (Extreme Gradient Boosting)** desarrollada por la comunidad y documentada en https://xgboost.ai/ . Nanomof 2025 (C)
     """
 )
+# --- NUEVA SECCIÓN: CREDIBILIDAD TÉCNICA ---
+st.markdown("---")
+st.markdown(
+    """
+    <div style='text-align: center; font-size: 0.9em; color: #666; margin-top: 20px;'>
+    <i>Nuestro <b>Prescriptor Edafológico</b> está utilizando la herramienta más robusta disponible en Python 
+    para resolver problemas no lineales de dosificación de enmiendas, basada en XGBoost (Extreme Gradient Boosting) 
+    desarrollada por la comunidad y documentada en https://xgboost.ai/ . Nanomof 2025 (C)</i>
+    </div>
+    """, 
+    unsafe_allow_html=True
+)
+
 
 
 
