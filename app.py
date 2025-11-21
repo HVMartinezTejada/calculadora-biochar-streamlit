@@ -58,12 +58,12 @@ st.markdown(
 
 
 # Creamos pestañas
-tab1, tab2 = st.tabs(["🤖 Simulación (Prescripción Única)", "📂 Proyecto de Servicios B2B (Entrenamiento)"])
+tab1, tab2 = st.tabs(["🤖 Simulación Servicios B2B)", "📂 Entrenamiento"])
 
 
 # --- PESTAÑA 1: SIMULACIÓN (PREDICCIÓN) ---
 with tab1:
-    st.header("Prescripción de Dosis (Consulta)")
+    st.header("Prescripción de Dosis")
 
     # 1. ADVERTENCIA DE CONFIANZA (Muestra el estado actual del modelo maestro)
     if st.session_state.get('is_real_model', False):
@@ -150,5 +150,6 @@ with tab2:
             st.error("Error: Asegúrate de que tu archivo CSV contenga las columnas 'ph', 'mo', y 'dosis_efectiva'.")
         except Exception as e:
             st.error(f"Error desconocido durante la carga/entrenamiento: {e}. Revisa el formato y el delimitador (';').")
+
 
 
