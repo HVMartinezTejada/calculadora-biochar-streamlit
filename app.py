@@ -9,15 +9,14 @@ st.set_page_config(page_title="Calculadora Biochar", layout="wide")
 # 1. Definir dos columnas: 1 parte para el logo (pequeño), 4 partes para el título (grande).
 col_logo, col_titulo = st.columns([1, 4]) 
 
-# 2. Colocar el Logo en la columna izquierda
-with col_logo:
-    # Asegúrate de que el nombre del archivo coincida exactamente
-    st.image("logonanomof.png", width=600) 
-
-# 3. Colocar el Título en la columna derecha
-with col_titulo:
+# 2. Columna izquierda
+ with col_titulo:
     st.title("🧪 Prescriptor Edafológico")
-st.markdown("""
+
+# 3. Columna derecha
+with col_logo:
+    st.image("logonanomof.png", width=600)
+    st.markdown("""
 *NanomofXGBoost*©️ Created by: HV Martínez-Tejada. **Nanomof 2025**.
 """)
 
@@ -97,6 +96,7 @@ with tab2:
             pred_real = st.session_state['model_real'].predict(pd.DataFrame([[r_ph, r_mo]], columns=['ph', 'mo']))[0]
 
             st.success(f"Dosis calculada: {pred_real:.2f} Ton/Ha")
+
 
 
 
