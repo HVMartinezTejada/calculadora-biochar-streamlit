@@ -58,7 +58,7 @@ with tab2:
     uploaded_file = st.file_uploader("Sube tu archivo CSV", type=["csv"])
     
     if uploaded_file is not None:
-        df_real = pd.read_csv(uploaded_file)
+        df_real = pd.read_csv(uploaded_file, encoding='latin1', sep=';')
         
         if st.button("Entrenar XGBoost con mis datos"):
             try:
@@ -86,4 +86,5 @@ with tab2:
         
         if st.button("Calcular (Modelo Real)"):
             pred_real = st.session_state['model_real'].predict(pd.DataFrame([[r_ph, r_mo]], columns=['ph', 'mo']))[0]
+
             st.success(f"Dosis calculada: {pred_real:.2f} Ton/Ha")
