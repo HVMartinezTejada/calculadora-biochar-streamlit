@@ -12,7 +12,7 @@ col_logo, col_titulo = st.columns([1, 4])
 # 2. Colocar el Logo en la columna izquierda
 with col_logo:
     # Asegúrate de que el nombre del archivo coincida exactamente
-    st.image("logonanomof.png", width=75) 
+    st.image("logonanomof.png", width=120) 
 
 # 3. Colocar el Título en la columna derecha
 with col_titulo:
@@ -97,6 +97,7 @@ with tab2:
             pred_real = st.session_state['model_real'].predict(pd.DataFrame([[r_ph, r_mo]], columns=['ph', 'mo']))[0]
 
             st.success(f"Dosis calculada: {pred_real:.2f} Ton/Ha")
+
 
 
 
