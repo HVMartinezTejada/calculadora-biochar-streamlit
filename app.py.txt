@@ -35,7 +35,21 @@ Conexión con el Concepto de Biochar:
 El biocarbón se utiliza principalmente en suelos que presentan algún tipo de limitación. Si un suelo tiene un $1.0\%$ de MO, es un suelo con baja capacidad de retención de agua y nutrientes, por lo que la adición de Biochar es muy relevante.Si un suelo tiene un $5.0\%$ de MO, sus propiedades físicas y químicas ya son muy buenas. Aunque el Biochar puede mejorar aspectos como la adsorción de metales pesados, la necesidad de agregar grandes cantidades para mejorar la fertilidad general disminuye.
 
 2. Pestaña "📂 Carga tus Datos Reales" (Uso Científico)
-Esta es la pestaña crucial que convierte la demo en una herramienta científica real para tu investigación. Aquí es donde le entregas los resultados de tus experimentos para que XGBoost aprenda tus patrones únicos.
+
+Los datos para entrenar el modelo muestran claramente la relación entre las características del suelo (pH y MO) y las dosis efectivas de biochar. Se observa que:
+
+En suelos ácidos (pH < 6.0) con baja MO (< 2.0%) se requieren dosis más altas (20-35 Ton/Ha)
+
+En suelos con MO > 4.0% las dosis efectivas son significativamente menores (5-8 Ton/Ha)
+
+Las aplicaciones específicas para remediación de metales pesados generalmente requieren dosis intermedias (15-25 Ton/Ha)
+
+Los suelos alcalinos (pH > 7.5) muestran respuestas efectivas con dosis moderadas (10-20 Ton/Ha)
+
+Con la primera carga de información el Modelo debió aprender:
+Condiciones Extremas (Dosis Alta): El modelo aprende que para suelos con pH bajo (4.2 - 4.9) y/o Materia Orgánica baja (0.8% - 1.5%), se necesitan dosis de Biochar significativamente más altas ($22$ a $35$ t/ha) para lograr una rehabilitación.Condiciones Óptimas (Dosis Baja): Aprenderá que para suelos con pH neutro a alcalino (6.9 - 8.1) y Materia Orgánica alta (3.5% - 5.2%), la dosis de Biochar es menor ($5$ a $12$ t/ha).
+--------------------------------------------------------------
+Esta es la pestaña crucial que convierte la demo en una herramienta científica real para mi trabajo de investigación. Aquí es donde le entrego los resultados de referenciapara que XGBoost aprenda patrones únicos.
 
 Requisito: El Archivo CSV
 Antes de usar esta pestaña, necesitas tener un archivo de datos. Crea una hoja de cálculo (Excel, Google Sheets, etc.) con los siguientes tres encabezados (columnas) y guarda el archivo en formato CSV (Valores Separados por Coma):
@@ -159,4 +173,5 @@ with tab2:
             pred_real = st.session_state['model_real'].predict(pd.DataFrame([[r_ph, r_mo]], columns=['ph', 'mo']))[0]
 
             st.success(f"Dosis calculada: {pred_real:.2f} Ton/Ha")
+
 
