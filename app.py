@@ -54,6 +54,18 @@ st.markdown(
     *NanomofXGBoost*©️ Created by: HV Martínez-Tejada. **NanoMof 2025**.
     """
 )
+# --- NUEVA SECCIÓN: CREDIBILIDAD TÉCNICA ---
+st.markdown("---")
+st.markdown(
+    """
+    <div style='text-align: center; font-size: 0.9em; color: #666; margin-top: 20px;'>
+    <i>Nuestro <b>Prescriptor Edafológico</b> está utilizando la herramienta más robusta disponible en Python 
+    para resolver problemas no lineales de dosificación de enmiendas, basada en XGBoost (Extreme Gradient Boosting) 
+    desarrollada por la comunidad y documentada en https://xgboost.ai/ . Nanomof 2025 (C)</i>
+    </div>
+    """, 
+    unsafe_allow_html=True
+)
 # --- FIN DE AJUSTES ESTÉTICOS ---
 
 
@@ -150,6 +162,7 @@ with tab2:
             st.error("Error: Asegúrate de que tu archivo CSV contenga las columnas 'ph', 'mo', y 'dosis_efectiva'.")
         except Exception as e:
             st.error(f"Error desconocido durante la carga/entrenamiento: {e}. Revisa el formato y el delimitador (';').")
+
 
 
 
