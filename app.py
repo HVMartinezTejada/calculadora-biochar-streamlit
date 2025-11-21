@@ -103,7 +103,7 @@ with tab1:
 
 # --- PESTAÑA 2: CARGA DE DATOS REALES (ENTRENAMIENTO) ---
 with tab2:
-    st.header("Datos de Laboratorio para el Actual Proyecto de Servicios B2B")
+    st.header("Datos de Entrenamiento")
     # Instrucciones
     st.info("Sube tu archivo CSV con columnas: 'ph', 'mo', 'dosis_efectiva'. **Separador: punto y coma ';'**.")
     
@@ -144,10 +144,11 @@ with tab2:
                 
                 st.markdown("---")
                 # Instrucción para el siguiente paso
-                st.warning("⚠️ **Siguiente Paso:** Use la pestaña **'Simulación (Prescripción Única)'** para consultar la Dosis Óptima, ya que ahora está utilizando este nuevo modelo de alta precisión.")
+                st.warning("⚠️ **Siguiente Paso:** Use la pestaña **'Simulación (Prescripción para Servicios B2B)'** para consultar la Dosis Óptima, ya que ahora está utilizando este nuevo modelo de alta precisión.")
 
         except KeyError:
             st.error("Error: Asegúrate de que tu archivo CSV contenga las columnas 'ph', 'mo', y 'dosis_efectiva'.")
         except Exception as e:
             st.error(f"Error desconocido durante la carga/entrenamiento: {e}. Revisa el formato y el delimitador (';').")
+
 
