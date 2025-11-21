@@ -8,12 +8,11 @@ st.set_page_config(page_title="Calculadora Biochar", layout="wide")
 
 st.title("🧪 Prescriptor Edafológico")
 st.markdown("""
-Esta aplicación demuestra el uso del algoritmo **XGBoost** (usado en *Scientific Reports, 2025*) 
-para predecir la dosis de Biochar.
+*NanomofXGBoost*©️ Created by: HV Martínez-Tejada **Nanomof 2025**.
 """)
 
 # Creamos pestañas
-tab1, tab2 = st.tabs(["🤖 Modo Simulación", "📂 Carga tus Datos Reales"])
+tab1, tab2 = st.tabs(["🤖 Dosificación", "📂 Datos Proyecto de Servicios B2B"])
 
 # --- PESTAÑA 1: SIMULACIÓN ---
 with tab1:
@@ -52,17 +51,17 @@ with tab1:
 
 # --- PESTAÑA 2: CARGA DE DATOS REALES ---
 with tab2:
-    st.header("Entrename con datos de laboratorio para el actual Proyecto de Servicios B2B de NanoMof")
-    st.info("Sube un archivo CSV con columnas: 'ph', 'mo', 'dosis_efectiva'")
+    st.header("Datos de laboratorio para el actual Proyecto de Servicios B2B")
+    st.info("Sube tu archivo CSV con columnas: 'ph', 'mo', 'dosis_efectiva'")
     
     uploaded_file = st.file_uploader("Sube tu archivo CSV", type=["csv"])
     
     if uploaded_file is not None:
         df_real = pd.read_csv(uploaded_file, encoding='latin1', sep=';')
         
-        if st.button("Entrenar XGBoost con mis datos"):
+        if st.button("Entrenar XGBoost con datos"):
             try:
-                # Asumimos que las columnas son 'ph', 'mo', 'dosis_efectiva'
+                # Las columnas son 'ph', 'mo', 'dosis_efectiva'
                 X = df_real[['ph', 'mo']]
                 y = df_real['dosis_efectiva']
                 
@@ -71,7 +70,7 @@ with tab2:
                 score = model_real.score(X, y)
                 
                 st.session_state['model_real'] = model_real
-                st.success(f"¡Modelo entrenado con TUS datos! Precisión (R2): {score:.4f}")
+                st.success(f"¡Modelo entrenado con datos de Laboratorio! Precisión (R2): {score:.4f}")
                 
             except KeyError:
                 st.error("Error: Asegúrate de que tu archivo CSV contenga las columnas 'ph', 'mo', y 'dosis_efectiva'.")
@@ -88,4 +87,5 @@ with tab2:
             pred_real = st.session_state['model_real'].predict(pd.DataFrame([[r_ph, r_mo]], columns=['ph', 'mo']))[0]
 
             st.success(f"Dosis calculada: {pred_real:.2f} Ton/Ha")
+
 
