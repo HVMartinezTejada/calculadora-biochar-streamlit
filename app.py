@@ -93,11 +93,11 @@ with tab1:
         st.subheader(f"Resultado de la Prescripción:")
         
         st.metric(label="Dosis de Biochar Recomendada", 
-                  value=f"{dosis_predicha:.2f} T/Ha", 
+                  value=f"{dosis_predicha:.2f} t/Ha", 
                   delta_color="off")
         
         st.markdown(f"""
-        Esta dosis (**{dosis_predicha:.2f} T/Ha**) es la prescripción del **Modelo Maestro** para un suelo con **pH {ph_input}** y **{mo_input}% de Materia Orgánica**.
+        Esta dosis (**{dosis_predicha:.2f} t/Ha**) es la prescripción del **Modelo Maestro** para un suelo con **pH {ph_input}** y **{mo_input}% de Materia Orgánica**.
         """)
 
 
@@ -150,3 +150,4 @@ with tab2:
             st.error("Error: Asegúrate de que tu archivo CSV contenga las columnas 'ph', 'mo', y 'dosis_efectiva'.")
         except Exception as e:
             st.error(f"Error desconocido durante la carga/entrenamiento: {e}. Revisa el formato y el delimitador (';').")
+
