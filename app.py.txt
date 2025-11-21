@@ -34,6 +34,9 @@ Riesgo de Extrapolación: Si el modelo solo ha sido entrenado con datos entre $1
 Conexión con el Concepto de Biochar:
 El biocarbón se utiliza principalmente en suelos que presentan algún tipo de limitación. Si un suelo tiene un $1.0\%$ de MO, es un suelo con baja capacidad de retención de agua y nutrientes, por lo que la adición de Biochar es muy relevante.Si un suelo tiene un $5.0\%$ de MO, sus propiedades físicas y químicas ya son muy buenas. Aunque el Biochar puede mejorar aspectos como la adsorción de metales pesados, la necesidad de agregar grandes cantidades para mejorar la fertilidad general disminuye.
 
+Nota:
+En varios casos los autores reportan carbono orgánico (SOC, %) y no directamente “% MO”; para homogenizar la tabla convertí SOC→MO usando el factor de Van Bemmelen (MO ≈ SOC×1,724). Cuando la dosis está en % (w/w) la he extrapolado a t/ha asumiendo 0–20 cm de suelo y densidad aparente 1,3 t/m³, dejando claro que es una equivalencia de laboratorio a campo, no una recomendación directa.
+
 2. Pestaña "📂 Carga tus Datos Reales" (Uso Científico)
 
 Los datos para entrenar el modelo muestran claramente la relación entre las características del suelo (pH y MO) y las dosis efectivas de biochar. Se observa que:
@@ -173,5 +176,6 @@ with tab2:
             pred_real = st.session_state['model_real'].predict(pd.DataFrame([[r_ph, r_mo]], columns=['ph', 'mo']))[0]
 
             st.success(f"Dosis calculada: {pred_real:.2f} Ton/Ha")
+
 
 
