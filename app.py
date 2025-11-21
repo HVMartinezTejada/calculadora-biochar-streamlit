@@ -145,8 +145,6 @@ st.markdown("---")
 st.markdown(
     """
     *NanomofXGBoost*©️ Created by: HV Martínez-Tejada. **NanoMof 2025**.
-    
-    ***
     """
 )
 # --- NUEVA SECCIÓN: CREDIBILIDAD TÉCNICA ---
@@ -156,11 +154,12 @@ st.markdown(
     <div style='text-align: center; font-size: 0.9em; color: #666; margin-top: 20px;'>
     <i>Nuestro <b>Prescriptor Edafológico</b> está utilizando la herramienta más robusta disponible en Python 
     para resolver problemas no lineales de dosificación de enmiendas, basada en XGBoost (Extreme Gradient Boosting) 
-    desarrollada por la comunidad y documentada en https://xgboost.ai/ . Nanomof 2025 (C)</i>
+    desarrollada por la comunidad y documentada en https://xgboost.ai/ . Nanomof 2025 ©️</i>
     </div>
     """, 
     unsafe_allow_html=True
 )
+
 
 
 
