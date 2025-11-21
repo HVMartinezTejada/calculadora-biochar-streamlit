@@ -6,19 +6,28 @@ import numpy as np
 # Configuración
 st.set_page_config(page_title="Calculadora Biochar", layout="wide")
 
-# 1. Definir dos columnas: 1 parte para el logo (pequeño), 4 partes para el título (grande).
-col_logo, col_titulo = st.columns([1, 4]) 
+# 1. Definir dos columnas: [Título, Logo]. Proporción 4:1.5 (el logo es pequeño)
+# La primera columna (4) es grande para el Título. La segunda (1.5) es para el Logo.
+col_titulo, col_logo = st.columns([4, 1.5]) 
 
-# 2. Columna izquierda
- with col_titulo:
+# 2. Colocar el Título en la primera columna (izquierda)
+with col_titulo:
+    # Usamos el nombre de marca acordado
     st.title("🧪 Prescriptor Edafológico")
 
-# 3. Columna derecha
+# 3. Colocar el Logo en la segunda columna (derecha)
 with col_logo:
-    st.image("logonanomof.png", width=600)
-    st.markdown("""
-*NanomofXGBoost*©️ Created by: HV Martínez-Tejada. **Nanomof 2025**.
-""")
+    # CORRECCIÓN CLAVE: Reducimos el ancho a un valor funcional (120px)
+    st.image("logonanomof.png", width=120) 
+
+# El contenido descriptivo (Introducción)
+   # Nota al pie (Footer): Se mueve fuera de las columnas para que ocupe todo el ancho
+st.markdown("---") # Una línea divisoria para separar el contenido principal de la nota al pie
+st.markdown(
+    """
+    *NanomofXGBoost*©️ Created by: HV Martínez-Tejada. **NanoMof 2025**.
+    """
+)
 
 # Creamos pestañas
 tab1, tab2 = st.tabs(["🤖 Simulación", "📂 Proyecto de Servicios B2B"])
