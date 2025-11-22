@@ -144,7 +144,7 @@ with tab2:
 st.markdown("---") 
 st.markdown(
     """
-    *NanomofXGBoost*©️ Created by: HV Martínez-Tejada. **NanoMof 2025**.
+    *NanomofXGBoost*©️ Created by: **NanoMof 2025**.
     """
 )
 # --- NUEVA SECCIÓN: CREDIBILIDAD TÉCNICA ---
@@ -159,6 +159,7 @@ st.markdown(
     """, 
     unsafe_allow_html=True
 )
+
 
 
 
