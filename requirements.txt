@@ -1,7 +1,9 @@
 # requirements.txt actualizado
-# xgboost==1.7.6  # ¡Cambia de 2.0.0 a 1.7.6!
 streamlit
 pandas
-xgboost==1.7.6
+xgboost>=1.7.0,<2.0.0  # Cualquier versión 1.7.x
 scikit-learn
 openpyxl
+numpy==1.24.3
+
+
