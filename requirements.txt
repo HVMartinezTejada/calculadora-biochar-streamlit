@@ -1,10 +1,11 @@
 # requirements.txt actualizado
 streamlit
 pandas
-xgboost  # Cualquier versión 1.7.x
+xgboost>=1.7.0,<2.0.0  # ← Cualquier 1.7.x, pero no 2.x
 scikit-learn
 openpyxl
 numpy
+
 
 
 
