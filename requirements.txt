@@ -2,7 +2,6 @@
 # xgboost==1.7.6  # ¡Cambia de 2.0.0 a 1.7.6!
 streamlit
 pandas
-xgboost==2.0.0
+xgboost==1.7.6
 scikit-learn
 openpyxl
-
