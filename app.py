@@ -976,28 +976,25 @@ with tab3:
 # =============================================================================
 
 with tab4:
-    st.header("⚗️ Ingeniería / QC")
-    st.markdown("""
-Esta sección está enfocada en **control de calidad y trazabilidad**, no en prescripción agronómica.
-Usa los mismos conceptos del QC Report que impactan la recomendación.
-""")
+    st.header("⚗️ Calculadoras de Ingeniería de Biochar")
 
-    st.subheader("Estado del sistema")
-    cA, cB, cC = st.columns(3)
-    with cA:
-        st.metric("Excel cargado", "Sí" if datos_excel is not None else "No")
-    with cB:
-        st.metric("Modelo XGBoost activo", "Sí" if st.session_state.modelo_activo else "No")
-    with cC:
-        st.metric("R² holdout", f"{st.session_state.r2_score:.3f}")
+    col_eng1, col_eng2 = st.columns(2)
 
-    st.markdown("---")
-    st.subheader("Notas rápidas de operación")
-    st.info("""
-- Si **no** entrenas XGBoost, la app funciona en modo **Determinístico + QC**.
-- Si entrenas XGBoost, pasa a **Híbrido**, con **peso dinámico** según R² y QC.
-- El Excel es **opcional**: útil para reglas/KB y para entrenar con un dataset de arranque si lo tienes.
-    """)
+    with col_eng1:
+        eng_feedstock = st.selectbox(
+            "Materia prima para cálculo",
+            ["Madera", "Cáscara cacao", "Paja trigo", "Bambú", "Estiércol"],
+            key="eng_feedstock"
+        )
+        eng_humedad = st.slider("Humedad (%)", 5.0, 30.0, 10.0, 1.0, key="eng_humedad")
+
+    with col_eng2:
+        eng_temperatura = st.slider("Temperatura (°C)", 300, 900, 550, 10, key="eng_temperatura")
+        eng_tiempo = st.slider("Tiempo residencia (min)", 15, 180, 60, 5, key="eng_tiempo")
+        eng_capacidad = st.number_input("Capacidad reactor (kg/h)", 10, 1000, 100, 10, key="eng_capacidad")
+
+    if st.button("⚖️ Calcular Balance Completo", type="primary", key="btn_balance_completo"):
+        st.write("✅ Botón funciona (aquí ya puedes llamar tus funciones de balance/secuestro).")
 
 # =============================================================================
 # FOOTER
@@ -1012,3 +1009,4 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
