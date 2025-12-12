@@ -994,7 +994,7 @@ with tab4:
         eng_capacidad = st.number_input("Capacidad reactor (kg/h)", 10, 1000, 100, 10, key="eng_capacidad")
 
     if st.button("⚖️ Calcular Balance Completo", type="primary", key="btn_balance_completo"):
-        st.write("✅ Botón funciona (aquí ya puedes llamar tus funciones de balance/secuestro).")
+        st.write("✅ Botón funciona (Las funciones de balance/secuestro deben responder a un balance termoquímico riguroso con composición, O/C, H/C, rendimientos medidos, etc).")
 
 # =============================================================================
 # FOOTER
@@ -1009,5 +1009,6 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
 
 
