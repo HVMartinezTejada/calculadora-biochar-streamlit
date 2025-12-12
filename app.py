@@ -550,7 +550,7 @@ auto_train = st.sidebar.checkbox(
 col1, col2 = st.columns([3, 1])
 with col1:
     st.markdown('<div class="main-header">🧬 Prescriptor Híbrido Biochar</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">QC (biochar serio) + Reglas determinísticas + XGBoost (pipeline)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">QC + Reglas determinísticas + XGBoost (pipeline)</div>', unsafe_allow_html=True)
 with col2:
     try:
         st.image("logonanomof.png", width=240)
@@ -1009,6 +1009,7 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
 
 
 
