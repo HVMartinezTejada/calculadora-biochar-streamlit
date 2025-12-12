@@ -1004,11 +1004,12 @@ st.markdown(
     f"""
     <div style='text-align:center;color:#666;padding:0.9rem;'>
     <b>Prescriptor Híbrido Biochar {APP_VERSION} 🌱⚗️</b><br>
-    QC (biochar serio) + reglas + XGBoost (pipeline) • NanoMof 2025 ©️
+    QC (biochar) + reglas + XGBoost (pipeline) • NanoMof 2025 ©️
     </div>
     """,
     unsafe_allow_html=True
 )
+
 
 
 
