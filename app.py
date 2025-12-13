@@ -1,5 +1,10 @@
 import os
+import io
+import re
+import csv
+import hashlib
 import warnings
+import unicodedata
 from dataclasses import dataclass
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -13,7 +18,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import r2_score
+from sklearn.metrics import r2_score, mean_absolute_error
 
 warnings.filterwarnings("ignore")
 
@@ -21,8 +26,9 @@ warnings.filterwarnings("ignore")
 # CONFIG
 # =============================================================================
 
-APP_VERSION = "v3.1 (QC + Pipeline XGBoost)"
+APP_VERSION = "v3.2 (QC + Ingeniería + Pipeline XGBoost)"
 DEFAULT_EXCEL_PATH = "Biochar_Prescriptor_Sistema_Completo_v1.0.xlsx"
+TARGET_COL = "dosis_efectiva"
 
 st.set_page_config(page_title="Prescriptor Híbrido Biochar", layout="wide", page_icon="🌱")
 
@@ -56,14 +62,30 @@ st.markdown("""
 # UTILIDADES
 # =============================================================================
 
+def strip_accents(s: str) -> str:
+    if s is None:
+        return ""
+    s = str(s)
+    return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+
+def canonical_col(s: str) -> str:
+    s0 = strip_accents(s).strip().lower()
+    s0 = re.sub(r"\s+", "_", s0)
+    s0 = re.sub(r"[^a-z0-9_]+", "", s0)
+    return s0
+
+def md5_bytes(b: bytes) -> str:
+    return hashlib.md5(b).hexdigest()
+
 def norm_tamano(label: str) -> str:
     s = (label or "").strip().lower()
-    if s.startswith("fino"):
+    if "<" in s or "fino" in s:
         return "Fino"
-    if s.startswith("medio"):
+    if "medio" in s:
         return "Medio"
-    if s.startswith("grueso"):
+    if "grues" in s or ">" in s:
         return "Grueso"
+    # si viene tipo "1-3 mm", "2-4 mm" lo tratamos como Medio
     return "Medio"
 
 def is_flor(cultivo: str) -> bool:
@@ -87,37 +109,51 @@ def safe_float(x, default=np.nan) -> float:
 # =============================================================================
 
 @st.cache_data(show_spinner=False)
-def cargar_datos_excel(excel_path: str) -> Optional[Dict[str, pd.DataFrame]]:
+def cargar_datos_excel_from_path(excel_path: str) -> Optional[Dict[str, pd.DataFrame]]:
     try:
         if not excel_path or not os.path.exists(excel_path):
             return None
-        parametros_df = pd.read_excel(excel_path, sheet_name="Parametros")
-        rangos_df = pd.read_excel(excel_path, sheet_name="Rangos_suelo")
-        algoritmos_df = pd.read_excel(excel_path, sheet_name="Algoritmos")
-        factores_df = pd.read_excel(excel_path, sheet_name="Factores_ajuste")
-        metadatos_df = pd.read_excel(excel_path, sheet_name="Metadatos_completos")
-        dosis_exp_df = pd.read_excel(excel_path, sheet_name="Dosis_experimental")
-        return {
-            "parametros": parametros_df,
-            "rangos": rangos_df,
-            "algoritmos": algoritmos_df,
-            "factores": factores_df,
-            "metadatos": metadatos_df,
-            "dosis_exp": dosis_exp_df,
-        }
+        xls = pd.ExcelFile(excel_path)
+        return _leer_hojas_excel(xls)
     except Exception as e:
-        st.error(f"Error cargando Excel: {e}")
+        st.error(f"Error cargando Excel (path): {e}")
         return None
+
+@st.cache_data(show_spinner=False)
+def cargar_datos_excel_from_bytes(excel_bytes: bytes, excel_hash: str) -> Optional[Dict[str, pd.DataFrame]]:
+    # excel_hash solo para cache-key estable
+    try:
+        bio = io.BytesIO(excel_bytes)
+        xls = pd.ExcelFile(bio)
+        return _leer_hojas_excel(xls)
+    except Exception as e:
+        st.error(f"Error cargando Excel (bytes): {e}")
+        return None
+
+def _leer_hojas_excel(xls: pd.ExcelFile) -> Dict[str, pd.DataFrame]:
+    def read_if(sheet):
+        if sheet in xls.sheet_names:
+            return pd.read_excel(xls, sheet_name=sheet)
+        return pd.DataFrame()
+
+    return {
+        "parametros": read_if("Parametros"),
+        "rangos": read_if("Rangos_suelo"),
+        "algoritmos": read_if("Algoritmos"),
+        "factores": read_if("Factores_ajuste"),
+        "metadatos": read_if("Metadatos_completos"),
+        "dosis_exp": read_if("Dosis_experimental"),
+    }
 
 
 # =============================================================================
-# QC REPORT — “biochar serio” como gate + score + incertidumbre
+# QC REPORT — score + gate + factor de confianza
 # =============================================================================
 
 @dataclass
 class QCReport:
     score: float
-    confidence_factor: float  # multiplica dosis (o ajusta peso ML)
+    confidence_factor: float
     can_prescribe: bool
     flags: List[str]
     notes: List[str]
@@ -130,60 +166,44 @@ def qc_pill(score: float) -> Tuple[str, str]:
     return ("pill-bad", "QC bajo")
 
 def compute_qc_report(p: Dict[str, Any]) -> QCReport:
-    """
-    QC enfocado en:
-    - Riesgo de oxidación: O2 + T_exposición + enfriamiento
-    - Coherencia de línea base (proximal) si existe
-    - Ratios H/C y O/C si existe (estabilidad)
-    - Cenizas como proxy de sales/alkalinidad
-    """
     score = 100.0
     flags, notes = [], []
 
-    # ----- Riesgo oxidación (no absolutista)
     o2_ppm = safe_float(p.get("O2_ppm"), default=np.nan)
-    o2_temp = safe_float(p.get("O2_temp_exposicion"), default=25.0)  # °C
+    o2_temp = safe_float(p.get("O2_temp_exposicion"), default=25.0)
     enf = (p.get("Metodo_enfriamiento") or "Desconocido").lower()
 
-    # “exposición peligrosa” = aire/O2 significativo a T elevada
     if np.isfinite(o2_ppm):
         if o2_ppm <= 2000:
             notes.append("O₂ bajo: buena condición para pirólisis controlada.")
         elif o2_ppm <= 10000:
-            score -= 10
-            flags.append("Riesgo oxidación (O₂ medio)")
+            score -= 10; flags.append("Riesgo oxidación (O₂ medio)")
             notes.append("O₂ medio: posible oxidación parcial / variabilidad.")
         else:
-            score -= 30
-            flags.append("Riesgo oxidación alto (O₂ alto)")
+            score -= 30; flags.append("Riesgo oxidación alto (O₂ alto)")
             notes.append("O₂ alto: probable desviación a combustión/gasificación parcial.")
     else:
-        score -= 6
-        flags.append("O₂ no reportado")
+        score -= 6; flags.append("O₂ no reportado")
         notes.append("Sin O₂ medido: aumenta incertidumbre de pirólisis real.")
 
     if o2_temp >= 100 and np.isfinite(o2_ppm) and o2_ppm > 2000:
-        score -= 18
-        flags.append("Exposición a O₂ a alta T")
+        score -= 18; flags.append("Exposición a O₂ a alta T")
         notes.append("Exposición a oxígeno a T>100°C aumenta oxidación y degrada estabilidad.")
 
-    # ----- Enfriamiento
-    if "cámara inerte" in enf or "inerte" in enf or "contacto indirecto" in enf:
+    if "camar" in enf and "inerte" in enf:
+        notes.append("Enfriamiento controlado: preserva mejor estructura.")
+    elif "inerte" in enf or "contacto indirecto" in enf:
         notes.append("Enfriamiento controlado: preserva mejor estructura.")
     elif "aire" in enf:
-        score -= 10
-        flags.append("Enfriamiento en aire")
+        score -= 10; flags.append("Enfriamiento en aire")
         notes.append("Aire durante enfriamiento puede oxidar superficialmente.")
     elif "agua" in enf:
-        score -= 22
-        flags.append("Apagado con agua")
+        score -= 22; flags.append("Apagado con agua")
         notes.append("Agua directa eleva variabilidad y oxidación; reduce confiabilidad.")
     else:
-        score -= 6
-        flags.append("Enfriamiento no especificado")
+        score -= 6; flags.append("Enfriamiento no especificado")
         notes.append("Método de enfriamiento desconocido: aumenta incertidumbre.")
 
-    # ----- Proximal (si existe)
     hum = safe_float(p.get("Humedad_total"), default=np.nan)
     vol = safe_float(p.get("Volatiles"), default=np.nan)
     ash = safe_float(p.get("Cenizas_biomasa"), default=np.nan)
@@ -192,81 +212,59 @@ def compute_qc_report(p: Dict[str, Any]) -> QCReport:
     if all(np.isfinite(v) for v in [hum, vol, ash, fc]):
         cierre = hum + vol + ash + fc
         if abs(cierre - 100) > 8:
-            score -= 10
-            flags.append("Cierre proximal inconsistente")
+            score -= 10; flags.append("Cierre proximal inconsistente")
             notes.append(f"Cierre proximal={cierre:.1f}%: revisar base seca/húmeda o datos.")
         else:
             notes.append(f"Cierre proximal OK ({cierre:.1f}%).")
-    else:
-        # no castigar duro: modo simple no lo tendrá
-        pass
 
-    # ----- Cenizas como proxy sales/alkalinidad
     if np.isfinite(ash):
         if ash > 20:
-            score -= 12
-            flags.append("Cenizas altas")
+            score -= 12; flags.append("Cenizas altas")
             notes.append("Cenizas muy altas: riesgo de sales/pH alto; cuidado en cultivos sensibles.")
         elif ash > 12:
-            score -= 6
-            flags.append("Cenizas moderadas-altas")
+            score -= 6; flags.append("Cenizas moderadas-altas")
             notes.append("Cenizas moderadas: monitorear EC/pH, especialmente en floricultura.")
-    # ----- Ratios H/C y O/C (si elemental disponible)
+
     hc = safe_float(p.get("H_C_ratio"), default=np.nan)
     oc = safe_float(p.get("O_C_ratio"), default=np.nan)
     if np.isfinite(hc):
         if hc < 0.7:
             notes.append("H/C bajo: indica mayor aromaticidad (mejor estabilidad).")
         else:
-            score -= 8
-            flags.append("H/C alto")
-            notes.append("H/C alto: menor aromaticidad; posible biochar menos estable.")
+            score -= 8; flags.append("H/C alto")
+            notes.append("H/C alto: posible biochar menos estable.")
     if np.isfinite(oc):
         if oc < 0.2:
             notes.append("O/C bajo: indicador de alta estabilidad (tendencial).")
         else:
-            score -= 8
-            flags.append("O/C alto")
+            score -= 8; flags.append("O/C alto")
             notes.append("O/C alto: posible menor estabilidad / mayor reactividad.")
 
-    # ----- Temperatura: no dogma, pero coherencia
     T = safe_float(p.get("T_pirolisis"), default=np.nan)
     if np.isfinite(T):
         if T < 350:
-            score -= 15
-            flags.append("T baja")
+            score -= 15; flags.append("T baja")
             notes.append("T<350°C: mayor fracción volátil/variabilidad; ojo con estabilidad.")
         elif T > 750:
-            score -= 6
-            flags.append("T muy alta")
+            score -= 6; flags.append("T muy alta")
             notes.append("T muy alta puede penalizar algunas funciones agronómicas según feedstock.")
     else:
-        score -= 4
-        flags.append("T no reportada")
+        score -= 4; flags.append("T no reportada")
         notes.append("Sin T reportada: aumenta incertidumbre.")
 
     score = float(np.clip(score, 0, 100))
 
-    # “gate” suave: solo bloquea si riesgo oxidación extremo + enfriamiento malo
     can_prescribe = True
     if ("Riesgo oxidación alto (O₂ alto)" in flags) and ("Apagado con agua" in flags):
         can_prescribe = False
 
-    # confidence_factor: afecta dosis y peso del ML
-    # (más QC → más confianza. QC bajo → conservador)
     confidence_factor = float(np.clip(score / 85.0, 0.65, 1.15))
 
-    return QCReport(
-        score=score,
-        confidence_factor=confidence_factor,
-        can_prescribe=can_prescribe,
-        flags=flags,
-        notes=notes
-    )
+    return QCReport(score=score, confidence_factor=confidence_factor, can_prescribe=can_prescribe, flags=flags, notes=notes)
 
 
 # =============================================================================
-# REGLAS DETERMINÍSTICAS — ahora usa Factores_ajuste si existe
+# REGLAS DETERMINÍSTICAS
 # =============================================================================
 
 def parse_coeficientes(coef_str: Any) -> Dict[str, float]:
@@ -280,16 +278,10 @@ def parse_coeficientes(coef_str: Any) -> Dict[str, float]:
     return coefs
 
 def aplicar_factores_excel(factores_df: pd.DataFrame, objetivo: str, suelo: dict, biochar: dict, cultivo: dict) -> float:
-    """
-    Espera (ideal):
-    columnas: Objetivo, Variable, Min, Max, Factor, Aplica_a (suelo/biochar/cultivo/any)
-    Si tu Excel no tiene exactamente estas columnas, hace best-effort.
-    """
     if factores_df is None or factores_df.empty:
         return 1.0
 
     df = factores_df.copy()
-    # normalizaciones suaves de nombres
     cols = {c.lower(): c for c in df.columns}
     def col(name): return cols.get(name.lower())
 
@@ -311,7 +303,6 @@ def aplicar_factores_excel(factores_df: pd.DataFrame, objetivo: str, suelo: dict
         var = str(r[c_var]).strip()
         factor = safe_float(r[c_fac], default=1.0)
 
-        # dónde buscar el valor
         val = None
         if c_app:
             app = str(r[c_app]).strip().lower()
@@ -333,7 +324,6 @@ def aplicar_factores_excel(factores_df: pd.DataFrame, objetivo: str, suelo: dict
         if not np.isfinite(v):
             continue
 
-        # rangos opcionales
         ok = True
         if c_min:
             vmin = safe_float(r[c_min], default=-np.inf)
@@ -349,13 +339,7 @@ def aplicar_factores_excel(factores_df: pd.DataFrame, objetivo: str, suelo: dict
 
     return float(np.clip(f_total, 0.2, 5.0))
 
-
 def calcular_dosis_deterministica(objetivo: str, suelo: dict, biochar: dict, cultivo: dict, datos_excel: Optional[Dict[str, pd.DataFrame]]) -> float:
-    """
-    - Si hay Excel: usa 'Algoritmos' + 'Factores_ajuste'
-    - Si no: fallback simple (tu lógica actual)
-    """
-    # Fallback simple (si no hay Excel)
     if datos_excel is None:
         base = 20.0
         ph = safe_float(suelo.get("pH"), 6.5)
@@ -367,7 +351,6 @@ def calcular_dosis_deterministica(objetivo: str, suelo: dict, biochar: dict, cul
             met = safe_float(suelo.get("Metales"), 0.0)
             base += 0.03 * met
 
-        # tamaño
         t = norm_tamano(biochar.get("Tamaño", "Medio"))
         if t == "Fino":
             base *= 1.15
@@ -392,20 +375,14 @@ def calcular_dosis_deterministica(objetivo: str, suelo: dict, biochar: dict, cul
 
     dosis_base = constante
 
-    # Ejemplo: si hay coefs, aplica sobre variables disponibles (suelo + biochar + cultivo)
-    # Nota: esto es general; puedes especializar por objetivo con reglas adicionales.
     for k, a in coefs.items():
-        # buscar k en suelo/biochar/cultivo
         val = suelo.get(k, biochar.get(k, cultivo.get(k)))
         v = safe_float(val, default=np.nan)
         if np.isfinite(v):
-            # aquí tu Excel debería definir el sentido; usamos una forma "lineal" genérica:
             dosis_base += a * v
 
-    # Factores desde Excel (si están bien estructurados)
     f_total = aplicar_factores_excel(factores, objetivo, suelo, biochar, cultivo)
 
-    # Ajuste por tamaño (ahora normalizado)
     t = norm_tamano(biochar.get("Tamaño", "Medio"))
     if t == "Fino":
         f_total *= 1.15
@@ -414,10 +391,8 @@ def calcular_dosis_deterministica(objetivo: str, suelo: dict, biochar: dict, cul
 
     return float(np.clip(dosis_base * f_total, 5, 50))
 
-
 def calcular_dosis_flores(suelo: dict, biochar: dict, flor: dict) -> float:
     dosis_base = 12.0
-
     sistema = flor.get("Sistema_cultivo", "Campo abierto")
     factores_sistema = {"Campo abierto": 1.0, "Invernadero": 0.8, "Maceta/Contenedor": 0.6, "Hidroponía": 0.4}
     factor_sistema = factores_sistema.get(sistema, 1.0)
@@ -434,7 +409,6 @@ def calcular_dosis_flores(suelo: dict, biochar: dict, flor: dict) -> float:
 
     sensibilidad = safe_float(flor.get("Sensibilidad_salinidad"), 1.5)
     cenizas = safe_float(biochar.get("Cenizas_biomasa"), np.nan)
-    # Si sensibilidad alta y cenizas altas: reducir
     if sensibilidad > 2.0 and np.isfinite(cenizas) and cenizas > 12:
         dosis_base *= 0.8
 
@@ -448,60 +422,233 @@ def calcular_dosis_flores(suelo: dict, biochar: dict, flor: dict) -> float:
 
 
 # =============================================================================
-# ML — XGBoost (Pipeline + OneHot + Imputer) + R² holdout
+# INGENIERÍA (simplificada, educativa)
 # =============================================================================
 
-def entrenar_modelo_xgb_pipeline(df: pd.DataFrame, target: str = "dosis_efectiva") -> Tuple[Pipeline, float, List[str]]:
+FEEDSTOCK_DB = {
+    "Madera":         {"C_pct": 48.0, "HHV_MJkg": 18.5, "char_y_550": 0.25, "biooil_y": 0.40, "stab": 0.85},
+    "Cáscara cacao":  {"C_pct": 52.0, "HHV_MJkg": 17.8, "char_y_550": 0.28, "biooil_y": 0.38, "stab": 0.78},
+    "Paja trigo":     {"C_pct": 45.0, "HHV_MJkg": 15.2, "char_y_550": 0.22, "biooil_y": 0.42, "stab": 0.72},
+    "Bambú":          {"C_pct": 50.0, "HHV_MJkg": 19.1, "char_y_550": 0.30, "biooil_y": 0.36, "stab": 0.88},
+    "Estiércol":      {"C_pct": 40.0, "HHV_MJkg": 14.5, "char_y_550": 0.35, "biooil_y": 0.30, "stab": 0.65},
+}
+
+def _stability_factor_temp(T: float) -> float:
+    if T < 400:
+        return 0.60
+    elif T < 550:
+        return 0.80
+    else:
+        return 0.90
+
+def calcular_balance_masa_energia(feedstock: str, humedad_pct: float, T: float, t_res_min: float) -> Dict[str, float]:
+    f = FEEDSTOCK_DB.get(feedstock, FEEDSTOCK_DB["Madera"])
+
+    # Rendimiento de char (tendencia: baja con T alta en pirólisis lenta)
+    char_y = f["char_y_550"] * (1.0 - 0.0008 * (T - 550))
+    char_y = float(np.clip(char_y, 0.12, 0.45))
+
+    # Ajuste por humedad (más humedad → menos rendimiento efectivo por unidad de biomasa húmeda)
+    seca_frac = float(np.clip(1.0 - humedad_pct / 100.0, 0.40, 0.98))
+    char_y_humeda = char_y * seca_frac
+
+    biooil_y = float(np.clip(f["biooil_y"] * (1.0 - 0.0002 * (T - 550)), 0.15, 0.55))
+    gas_y = float(np.clip(1.0 - (char_y + biooil_y), 0.10, 0.60))
+
+    # Energía específica (muy simplificada) MJ/kg biomasa húmeda
+    # incluye calentamiento + penalización por tiempo
+    energia = 0.8 + 0.0022 * max(T - 20, 0) + 0.0008 * max(t_res_min - 30, 0)
+    energia = float(np.clip(energia, 1.0, 8.0))
+
+    return {
+        "seca_frac": seca_frac,
+        "rend_char_base": char_y * 100.0,
+        "rend_char_humeda": char_y_humeda * 100.0,
+        "rend_biooil": biooil_y * 100.0,
+        "rend_gas": gas_y * 100.0,
+        "energia_MJ_kg": energia,
+        "C_pct": f["C_pct"],
+    }
+
+def calcular_secuestro_carbono(feedstock: str, T: float, rend_char_base_pct: float) -> Dict[str, float]:
+    f = FEEDSTOCK_DB.get(feedstock, FEEDSTOCK_DB["Madera"])
+    stab_fs = f["stab"]
+    stab_T = _stability_factor_temp(T)
+
+    # Carbono retenido (% del C inicial de la biomasa seca, aproximado)
+    # (C_pct * char_y * estabilidad)
+    char_y = rend_char_base_pct / 100.0
+    C_ret = f["C_pct"] * char_y * stab_fs * stab_T  # [%C (biomasa seca) retenido como "C estable" aproximado]
+
+    # ton C / ton biochar (aprox): suponemos biochar ~70% C fijo si T>=500, si no ~55%
+    C_in_char = 0.70 if T >= 500 else 0.55
+    tC_por_tbiochar = C_in_char  # tC/tbiochar
+
+    vida = 50 if T < 450 else (100 if T < 600 else 500)
+
+    return {
+        "C_ret_pct": float(C_ret),
+        "tC_por_tbiochar": float(tC_por_tbiochar),
+        "vida_media_anios": float(vida),
+    }
+
+
+# =============================================================================
+# ML — XGBoost pipeline + R² holdout (sin dropna masivo)
+# =============================================================================
+
+CANON_MAP = {
+    # suelos
+    "ph": "pH",
+    "mo": "MO",
+    "cic": "CIC",
+    "metales": "Metales",
+    "estado_suelo": "Estado_suelo",
+    "textura": "Textura",
+
+    # biochar
+    "t_pirolysis": "T_pirolisis",
+    "t_pirolisis": "T_pirolisis",
+    "t_piroli": "T_pirolisis",
+    "t_pirólisis": "T_pirolisis",
+    "tpirólisis": "T_pirolisis",
+    "pH_biochar".lower(): "pH_biochar",
+    "area_bet": "Area_BET",
+    "área_bet": "Area_BET",
+    "area_superficial": "Area_BET",
+    "tamaño_biochar": "Tamaño",
+    "tamano_biochar": "Tamaño",
+    "tamaño": "Tamaño",
+    "tamano": "Tamaño",
+    "feedstock": "Feedstock",
+
+    # agronomía
+    "objetivo": "Objetivo",
+    "cultivo": "Cultivo",
+    "riego": "Riego",
+    "clima": "Clima",
+
+    # target
+    "dosis_efectiva": TARGET_COL,
+}
+
+DROP_IDLIKE_PATTERNS = [
+    r"^fuente$",
+    r"doi",
+    r"referencia",
+    r"url",
+]
+
+def normalizar_columnas_dataset(df: pd.DataFrame) -> pd.DataFrame:
+    df2 = df.copy()
+    ren = {}
+    for c in df2.columns:
+        cc = canonical_col(c)
+        # mapeo directo si existe
+        if cc in CANON_MAP:
+            ren[c] = CANON_MAP[cc]
+        else:
+            # si viene exactamente igual a una canónica
+            if c in ["pH", "MO", "CIC", "Metales", "Textura", "Estado_suelo", "Feedstock", "T_pirolisis", "pH_biochar", "Area_BET", "Tamaño", "Objetivo", "Cultivo", "Riego", "Clima", TARGET_COL]:
+                ren[c] = c
+    df2 = df2.rename(columns=ren)
+
+    # drop columnas tipo ID (Fuente/DOI)
+    cols_drop = []
+    for c in df2.columns:
+        cc = canonical_col(c)
+        for pat in DROP_IDLIKE_PATTERNS:
+            if re.search(pat, cc):
+                cols_drop.append(c)
+                break
+    if cols_drop:
+        df2 = df2.drop(columns=cols_drop, errors="ignore")
+
+    # asegurar target numérico si existe
+    if TARGET_COL in df2.columns:
+        df2[TARGET_COL] = pd.to_numeric(df2[TARGET_COL], errors="coerce")
+
+    # normalizar algunos campos numéricos típicos
+    for coln in ["pH", "MO", "CIC", "Metales", "T_pirolisis", "pH_biochar", "Area_BET"]:
+        if coln in df2.columns:
+            df2[coln] = pd.to_numeric(df2[coln], errors="coerce")
+
+    # normalizar tamaño si existe
+    if "Tamaño" in df2.columns:
+        df2["Tamaño"] = df2["Tamaño"].astype(str).apply(norm_tamano)
+
+    return df2
+
+def entrenar_modelo_xgb_pipeline(df_raw: pd.DataFrame, target: str = TARGET_COL) -> Tuple[Pipeline, float, float, List[str], Dict[str, Any]]:
+    df = normalizar_columnas_dataset(df_raw)
+
     if target not in df.columns:
-        raise ValueError(f"El dataset debe incluir la columna '{target}'")
+        raise ValueError(f"El dataset debe incluir la columna '{target}' (tras normalización).")
+
+    # NO hacer dropna total: solo exigir target
+    df = df[df[target].notna()].copy()
+
+    if len(df) < 5:
+        raise ValueError(f"Dataset insuficiente tras filtrar target: n={len(df)} (mínimo recomendado: 5).")
 
     X = df.drop(columns=[target]).copy()
     y = df[target].copy()
 
-    # columnas esperadas (para alinear predicción)
     expected_cols = list(X.columns)
 
     cat_cols = X.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
     num_cols = [c for c in X.columns if c not in cat_cols]
 
-    num_pipe = Pipeline(steps=[
-        ("imputer", SimpleImputer(strategy="median")),
-    ])
-
-    cat_pipe = Pipeline(steps=[
-        ("imputer", SimpleImputer(strategy="most_frequent")),
-        ("oh", OneHotEncoder(handle_unknown="ignore")),
-    ])
-
     pre = ColumnTransformer(
         transformers=[
-            ("num", num_pipe, num_cols),
-            ("cat", cat_pipe, cat_cols),
+            ("num", Pipeline([("imputer", SimpleImputer(strategy="median"))]), num_cols),
+            ("cat", Pipeline([
+                ("imputer", SimpleImputer(strategy="most_frequent")),
+                ("oh", OneHotEncoder(handle_unknown="ignore")),
+            ]), cat_cols),
         ],
-        remainder="drop",
+        remainder="drop"
     )
 
     model = xgb.XGBRegressor(
         objective="reg:squarederror",
-        n_estimators=400,
+        n_estimators=450,
         learning_rate=0.05,
         max_depth=6,
         subsample=0.9,
         colsample_bytree=0.9,
         random_state=42,
+        eval_metric="rmse",
     )
 
-    pipe = Pipeline(steps=[
-        ("pre", pre),
-        ("model", model),
-    ])
+    pipe = Pipeline(steps=[("pre", pre), ("model", model)])
 
-    Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, random_state=42)
+    # holdout seguro
+    n = len(X)
+    test_size = 0.2
+    if n < 10:
+        # con muy pocos datos, al menos deja 1 test y >=3 train si se puede
+        test_n = max(1, int(round(n * 0.2)))
+        test_n = min(test_n, n - 2)
+        test_size = test_n / n
+
+    Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=test_size, random_state=42)
+
     pipe.fit(Xtr, ytr)
-    r2 = r2_score(yte, pipe.predict(Xte))
+    pred = pipe.predict(Xte)
 
-    return pipe, float(r2), expected_cols
+    r2 = r2_score(yte, pred) if len(yte) >= 2 else float("nan")
+    mae = mean_absolute_error(yte, pred) if len(yte) >= 1 else float("nan")
 
+    info = {
+        "n_total": int(n),
+        "n_train": int(len(Xtr)),
+        "n_test": int(len(Xte)),
+        "cat_cols": cat_cols,
+        "num_cols": num_cols,
+    }
+
+    return pipe, float(r2), float(mae), expected_cols, info
 
 def preparar_input_modelo(expected_cols: List[str], params_flat: Dict[str, Any]) -> pd.DataFrame:
     row = {}
@@ -511,7 +658,54 @@ def preparar_input_modelo(expected_cols: List[str], params_flat: Dict[str, Any])
 
 
 # =============================================================================
-# UI — Sidebar: Excel opcional + autoentreno opcional
+# LECTURA ROBUSTA DE CSV (delimitador/encoding)
+# =============================================================================
+
+def read_uploaded_csv(uploaded) -> pd.DataFrame:
+    raw = uploaded.getvalue()
+
+    # encoding fallback (sin “inventar”)
+    encodings = ["utf-8", "utf-8-sig", "latin-1"]
+    last_err = None
+
+    for enc in encodings:
+        try:
+            text = raw.decode(enc)
+            break
+        except Exception as e:
+            last_err = e
+            text = None
+    if text is None:
+        raise ValueError(f"No pude decodificar el archivo. Último error: {last_err}")
+
+    # detectar separador: prueba \t, ;, ,
+    sample = "\n".join(text.splitlines()[:5])
+    seps = ["\t", ";", ","]
+    best_df = None
+    best_cols = -1
+    best_sep = None
+
+    for sep in seps:
+        try:
+            df = pd.read_csv(io.StringIO(text), sep=sep)
+            if df.shape[1] > best_cols:
+                best_df = df
+                best_cols = df.shape[1]
+                best_sep = sep
+        except Exception:
+            continue
+
+    if best_df is None or best_cols <= 1:
+        # fallback a engine=python con sniff
+        df = pd.read_csv(io.StringIO(text), sep=None, engine="python")
+        return df
+
+    st.caption(f"✅ Separador detectado: {repr(best_sep)} | Columnas: {best_cols}")
+    return best_df
+
+
+# =============================================================================
+# SIDEBAR — Excel opcional + autoentreno
 # =============================================================================
 
 st.sidebar.markdown(f"### ⚙️ Configuración ({APP_VERSION})")
@@ -522,70 +716,84 @@ excel_choice = st.sidebar.radio(
     index=0
 )
 
-excel_path = None
-uploaded_excel = None
+datos_excel = None
+excel_hash = None
+excel_name = None
 
 if excel_choice == "Usar ruta por defecto":
-    excel_path = DEFAULT_EXCEL_PATH
+    datos_excel = cargar_datos_excel_from_path(DEFAULT_EXCEL_PATH)
+    excel_name = os.path.basename(DEFAULT_EXCEL_PATH)
 elif excel_choice == "Subir Excel":
     uploaded_excel = st.sidebar.file_uploader("Sube el Excel del sistema", type=["xlsx"])
     if uploaded_excel is not None:
-        # guardar en disco temporalmente (Streamlit necesita path)
-        tmp_path = os.path.join(".", "__tmp_biochar_system.xlsx")
-        with open(tmp_path, "wb") as f:
-            f.write(uploaded_excel.getbuffer())
-        excel_path = tmp_path
+        b = uploaded_excel.getvalue()
+        excel_hash = md5_bytes(b)
+        excel_name = uploaded_excel.name
+        st.session_state["excel_bytes"] = b
+        st.session_state["excel_hash"] = excel_hash
+        st.session_state["excel_name"] = excel_name
+        datos_excel = cargar_datos_excel_from_bytes(b, excel_hash)
 else:
-    excel_path = None
+    datos_excel = None
 
-datos_excel = cargar_datos_excel(excel_path) if excel_path else None
+if excel_choice == "Subir Excel" and uploaded_excel is None:
+    st.sidebar.info("Sube un Excel para activar KB/reglas/dataset (opcional).")
 
 auto_train = st.sidebar.checkbox(
     "Autoentrenar XGBoost al iniciar (si hay dataset en Excel)",
     value=False,
-    help="Solo se activa si el Excel tiene hoja 'Dosis_experimental' con 'dosis_efectiva'."
+    help="Entrena 1 vez por archivo (hash). Requiere hoja Dosis_experimental con dosis_efectiva."
 )
 
-# header
+# =============================================================================
+# HEADER
+# =============================================================================
+
 col1, col2 = st.columns([3, 1])
 with col1:
     st.markdown('<div class="main-header">🧬 Prescriptor Híbrido Biochar</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">QC + Reglas determinísticas + XGBoost (pipeline)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">QC + Reglas determinísticas + Ingeniería (educativa) + XGBoost (pipeline)</div>', unsafe_allow_html=True)
 with col2:
     try:
         st.image("logonanomof.png", width=240)
     except Exception:
         st.markdown("### **NanoMof**")
 
-
 # =============================================================================
 # SESSION STATE
 # =============================================================================
 
-if "modelo_pipe" not in st.session_state:
-    st.session_state.modelo_pipe = None
-if "modelo_activo" not in st.session_state:
-    st.session_state.modelo_activo = False
-if "r2_score" not in st.session_state:
-    st.session_state.r2_score = 0.0
-if "expected_cols" not in st.session_state:
-    st.session_state.expected_cols = []
-if "parametros_usuario" not in st.session_state:
-    st.session_state.parametros_usuario = {}
+for k, v in {
+    "modelo_pipe": None,
+    "modelo_activo": False,
+    "r2_score": 0.0,
+    "mae_score": 0.0,
+    "expected_cols": [],
+    "ml_info": {},
+    "trained_hash": None,
+    "parametros_usuario": {},
+}.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
-# Autoentreno opcional (solo si el usuario lo pidió)
-if auto_train and (not st.session_state.modelo_activo) and datos_excel is not None:
-    try:
-        df0 = datos_excel.get("dosis_exp")
-        if df0 is not None and "dosis_efectiva" in df0.columns and len(df0) >= 30:
-            pipe, r2, expected_cols = entrenar_modelo_xgb_pipeline(df0.dropna())
-            st.session_state.modelo_pipe = pipe
-            st.session_state.r2_score = r2
-            st.session_state.expected_cols = expected_cols
-            st.session_state.modelo_activo = True
-    except Exception:
-        # no interrumpir la app si falla autoentreno
-        pass
+# Autoentreno (solo 1 vez por Excel hash)
+if auto_train and datos_excel is not None:
+    df0 = datos_excel.get("dosis_exp")
+    if df0 is not None and not df0.empty and TARGET_COL in [c if c == TARGET_COL else c for c in normalizar_columnas_dataset(df0).columns]:
+        current_hash = st.session_state.get("excel_hash") or ("path:" + DEFAULT_EXCEL_PATH)
+        if st.session_state.get("trained_hash") != current_hash:
+            try:
+                pipe, r2, mae, expected_cols, info = entrenar_modelo_xgb_pipeline(df0)
+                st.session_state.modelo_pipe = pipe
+                st.session_state.r2_score = r2
+                st.session_state.mae_score = mae
+                st.session_state.expected_cols = expected_cols
+                st.session_state.ml_info = info
+                st.session_state.modelo_activo = True
+                st.session_state.trained_hash = current_hash
+            except Exception:
+                # no romper la app
+                pass
 
 
 # =============================================================================
@@ -617,7 +825,7 @@ with tab1:
     if modo_experto:
         st.markdown("""
         <div class="expert-box">
-        <b>Modo experto activo:</b> la prescripción se ajusta por un QC Report (riesgo de oxidación + estabilidad).
+        <b>Modo experto activo:</b> la prescripción se ajusta por QC Report (riesgo de oxidación + estabilidad).
         </div>
         """, unsafe_allow_html=True)
 
@@ -642,12 +850,10 @@ with tab1:
         tamaño_ui = st.selectbox("Tamaño partícula", ["Fino (<1 mm)", "Medio (1-5 mm)", "Grueso (>5 mm)"])
         area_bet = st.slider("Área superficial BET (m²/g)", 10, 600, 300, 10)
 
-        # EXPERTO: QC + proceso
         if modo_experto:
             st.markdown("---")
             st.subheader("⚗️ QC + Proceso (experto)")
 
-            # Línea base (proximal)
             hum_total = st.slider("Humedad total biomasa (%)", 0.0, 60.0, 10.0, 0.5)
             volatiles = st.slider("Volátiles biomasa (%)", 0.0, 90.0, 70.0, 0.5)
             cenizas_biomasa = st.slider("Cenizas biomasa (%)", 0.0, 40.0, 3.0, 0.5)
@@ -655,18 +861,15 @@ with tab1:
             cierre = hum_total + volatiles + cenizas_biomasa + carbono_fijo
             st.caption(f"Cierre proximal = {cierre:.1f}% (ideal ~100%, ojo base seca vs húmeda)")
 
-            # Oxígeno + exposición
             o2_ppm = st.number_input("O₂ residual (ppm) en reactor/enfriamiento", 0, 50000, 5000, 250)
             o2_temp = st.slider("Temperatura durante posible exposición a O₂ (°C)", 20, 600, 120, 10)
 
-            # Enfriamiento
             metodo_enfriamiento = st.selectbox(
                 "Método de enfriamiento",
                 ["Cámara inerte", "Contacto indirecto", "En aire", "Agua directa", "Desconocido"],
                 index=0
             )
 
-            # Ratios (si hay elemental)
             st.markdown("**Estabilidad (si tienes elemental):**")
             hc_ratio = st.number_input("H/C (molar)", 0.0, 2.0, 0.65, 0.01)
             oc_ratio = st.number_input("O/C (molar)", 0.0, 1.5, 0.18, 0.01)
@@ -704,17 +907,16 @@ with tab1:
             objetivo_calidad = "No aplica"
             sensibilidad_salinidad = 1.5
 
-    # Guardar parámetros (flat + por grupos)
     suelo = {"pH": ph_suelo, "MO": mo_suelo, "CIC": cic_suelo, "Textura": textura, "Metales": metales}
     biochar = {
         "Feedstock": feedstock,
         "T_pirolisis": temp_pirolisis,
         "pH_biochar": ph_biochar,
         "Tamaño": norm_tamano(tamaño_ui),
-        "BET": area_bet,
+        "Area_BET": area_bet,  # <- clave canónica para ML
     }
     cultivo_d = {
-        "Tipo": cultivo,
+        "Cultivo": cultivo,
         "Riego": sistema_riego,
         "Clima": clima,
         "Sistema_cultivo": sistema_cultivo,
@@ -723,7 +925,6 @@ with tab1:
         "Sensibilidad_salinidad": sensibilidad_salinidad,
     }
 
-    # Agregar experto a biochar
     if modo_experto:
         biochar.update({
             "Humedad_total": hum_total,
@@ -739,11 +940,9 @@ with tab1:
 
     st.session_state.parametros_usuario = {"suelo": suelo, "biochar": biochar, "cultivo": cultivo_d, "objetivo": objetivo, "modo_experto": modo_experto}
 
-    # QC Report (si modo experto; si no, hace QC “ligero” con lo disponible)
     qc = compute_qc_report(biochar)
-
-    # Render QC
     pill_class, pill_text = qc_pill(qc.score)
+
     st.markdown(f"""
     <div class="qc-box">
       <span class="qc-pill {pill_class}">{pill_text}</span>
@@ -759,10 +958,9 @@ with tab1:
     if not qc.can_prescribe:
         st.error("GATE activado: con O₂ alto + apagado con agua, la app no recomienda dosis (alta probabilidad de material no controlado).")
 
-    # Botón principal
     if st.button("🎯 Calcular Dosis Híbrida", type="primary", use_container_width=True, disabled=(not qc.can_prescribe)):
         with st.spinner("Calculando..."):
-            # Determinístico (o flores)
+
             if es_flor:
                 dosis_det = calcular_dosis_flores(suelo, biochar, cultivo_d)
                 tipo_det = "Especializado floricultura"
@@ -770,17 +968,13 @@ with tab1:
                 dosis_det = calcular_dosis_deterministica(objetivo, suelo, biochar, cultivo_d, datos_excel)
                 tipo_det = "Determinístico"
 
-            # Ajuste por QC (conservador cuando QC baja)
             dosis_det_qc = float(np.clip(dosis_det * qc.confidence_factor, 3, 60))
 
             dosis_xgb = None
             metodo = tipo_det
 
-            # ML: predicción si modelo activo
             if st.session_state.modelo_activo and st.session_state.modelo_pipe is not None:
                 try:
-                    # Flatten: usar nombres de columnas esperadas
-                    # Nota: si tu dataset usa nombres distintos, el usuario debe entrenar con esas columnas.
                     flat = {}
                     flat.update(suelo)
                     flat.update(biochar)
@@ -793,11 +987,10 @@ with tab1:
                     st.warning(f"Predicción XGBoost no disponible: {e}")
                     dosis_xgb = None
 
-            # Peso dinámico del ML
             if dosis_xgb is not None:
                 r2 = st.session_state.r2_score
                 peso_xgb = 0.6
-                if r2 < 0.5:
+                if np.isfinite(r2) and r2 < 0.5:
                     peso_xgb = 0.3
                 if qc.score < 60:
                     peso_xgb = min(peso_xgb, 0.35)
@@ -833,7 +1026,8 @@ with tab1:
                 st.metric("Determinístico", f"{dosis_det:.1f} t/Ha", delta=f"QC×{qc.confidence_factor:.2f} → {dosis_det_qc:.1f}")
             with r2c:
                 if mostrar_xgb:
-                    st.metric("XGBoost", f"{dosis_xgb:.1f} t/Ha", delta=f"R² holdout: {st.session_state.r2_score:.3f}")
+                    st.metric("XGBoost", f"{dosis_xgb:.1f} t/Ha",
+                              delta=f"R² holdout: {st.session_state.r2_score:.3f} | MAE: {st.session_state.mae_score:.2f}")
                 else:
                     st.metric("XGBoost", "—", delta="Modelo inactivo")
             with r3:
@@ -842,7 +1036,7 @@ with tab1:
             with st.expander("📋 Detalles y trazabilidad", expanded=True):
                 st.markdown(f"""
 **Suelo:** pH={ph_suelo}, MO={mo_suelo}%, CIC={cic_suelo}, Textura={textura}, Metales={metales}  
-**Biochar:** Feedstock={feedstock}, T={temp_pirolisis}°C, pH={ph_biochar}, Tamaño={norm_tamano(tamaño_ui)}, BET={area_bet}  
+**Biochar:** Feedstock={feedstock}, T={temp_pirolisis}°C, pH={ph_biochar}, Tamaño={norm_tamano(tamaño_ui)}, Area_BET={area_bet}  
 **Cultivo:** {cultivo} | Riego={sistema_riego} | Clima={clima} | Objetivo={objetivo}  
 **QC:** score={qc.score:.0f}, flags={", ".join(qc.flags) if qc.flags else "—"}
                 """)
@@ -851,13 +1045,12 @@ with tab1:
 **Experto:** O₂={o2_ppm} ppm (Texp={o2_temp}°C) | Enfriamiento={metodo_enfriamiento} | Proximal cierre={cierre:.1f}% | H/C={hc_ratio} | O/C={oc_ratio}
                     """)
 
-            # Export
             out = pd.DataFrame({
                 "Parámetro": [
                     "Dosis_final_t_ha", "Metodo", "QC_score", "QC_factor", "QC_flags",
                     "Objetivo", "Cultivo", "Riego", "Clima",
-                    "pH_suelo", "MO", "CIC", "Textura", "Metales",
-                    "Feedstock", "T_pirolisis", "pH_biochar", "Tamaño", "BET",
+                    "pH", "MO", "CIC", "Textura", "Metales",
+                    "Feedstock", "T_pirolisis", "pH_biochar", "Tamaño", "Area_BET",
                 ],
                 "Valor": [
                     f"{dosis_final:.2f}", metodo, f"{qc.score:.0f}", f"{qc.confidence_factor:.2f}", "; ".join(qc.flags),
@@ -876,8 +1069,8 @@ with tab1:
                 })
                 out = pd.concat([out, extra], ignore_index=True)
 
-            csv = out.to_csv(index=False)
-            st.download_button("📥 Descargar resultados (CSV)", data=csv, file_name="prescripcion_biochar.csv", mime="text/csv")
+            csv_out = out.to_csv(index=False)
+            st.download_button("📥 Descargar resultados (CSV)", data=csv_out, file_name="prescripcion_biochar.csv", mime="text/csv")
 
 
 # =============================================================================
@@ -887,40 +1080,51 @@ with tab1:
 with tab2:
     st.header("Entrenamiento del Modelo (XGBoost)")
     st.markdown("""
-- El modelo **solo se activa** si entrenas con un dataset que tenga `dosis_efectiva`.
-- El R² mostrado es **holdout** (20% test), no sobre los datos de entrenamiento.
+- El modelo **sigue siendo XGBoost**, pero dentro de un **Pipeline**:  
+  `SimpleImputer + OneHotEncoder(handle_unknown="ignore") + XGBRegressor`.
+- El R² mostrado es **holdout** (test 20% aprox), no sobre training.
+- **Ojo:** con muy pocas filas, el R² puede ser volátil.
 """)
 
     uploaded_csv = st.file_uploader("📤 Subir dataset (CSV) con 'dosis_efectiva'", type=["csv"])
 
     if uploaded_csv is not None:
         try:
-            df = pd.read_csv(uploaded_csv)
-            st.subheader("Vista previa")
-            st.dataframe(df.head(), use_container_width=True)
+            df_raw = read_uploaded_csv(uploaded_csv)
+            st.subheader("Vista previa (raw)")
+            st.dataframe(df_raw.head(), use_container_width=True)
 
-            if "dosis_efectiva" not in df.columns:
-                st.error("Falta la columna 'dosis_efectiva'.")
+            df_norm = normalizar_columnas_dataset(df_raw)
+            st.subheader("Vista previa (normalizada)")
+            st.dataframe(df_norm.head(), use_container_width=True)
+
+            if TARGET_COL not in df_norm.columns:
+                st.error(f"Falta la columna '{TARGET_COL}' (o no se pudo mapear).")
             else:
                 if st.button("🚀 Entrenar XGBoost (Pipeline)", type="primary"):
                     with st.spinner("Entrenando..."):
-                        pipe, r2, expected_cols = entrenar_modelo_xgb_pipeline(df.dropna())
+                        pipe, r2, mae, expected_cols, info = entrenar_modelo_xgb_pipeline(df_raw)
                         st.session_state.modelo_pipe = pipe
                         st.session_state.r2_score = r2
+                        st.session_state.mae_score = mae
                         st.session_state.expected_cols = expected_cols
+                        st.session_state.ml_info = info
                         st.session_state.modelo_activo = True
 
                     st.success("Modelo entrenado y activado ✅")
                     st.metric("R² (holdout)", f"{r2:.4f}")
+                    st.metric("MAE (holdout)", f"{mae:.2f}")
+                    st.caption(f"n_total={info['n_total']} | train={info['n_train']} | test={info['n_test']}")
                     st.caption(f"Columnas esperadas por el modelo: {len(expected_cols)}")
 
         except Exception as e:
             st.error(f"Error entrenando: {e}")
 
     st.markdown("---")
-    st.subheader("Entrenar con dataset del Excel (opcional)")
+    st.subheader("Entrenar con dataset del Excel cargado (opcional)")
+
     if datos_excel is None:
-        st.info("No hay Excel cargado. Puedes entrenar subiendo un CSV.")
+        st.info("No hay Excel cargado en el sidebar.")
     else:
         df_excel = datos_excel.get("dosis_exp")
         if df_excel is None or df_excel.empty:
@@ -930,13 +1134,16 @@ with tab2:
             if st.button("🔄 Entrenar con Dosis_experimental del Excel"):
                 try:
                     with st.spinner("Entrenando..."):
-                        pipe, r2, expected_cols = entrenar_modelo_xgb_pipeline(df_excel.dropna())
+                        pipe, r2, mae, expected_cols, info = entrenar_modelo_xgb_pipeline(df_excel)
                         st.session_state.modelo_pipe = pipe
                         st.session_state.r2_score = r2
+                        st.session_state.mae_score = mae
                         st.session_state.expected_cols = expected_cols
+                        st.session_state.ml_info = info
                         st.session_state.modelo_activo = True
                     st.success("Modelo entrenado con Excel ✅")
                     st.metric("R² (holdout)", f"{r2:.4f}")
+                    st.metric("MAE (holdout)", f"{mae:.2f}")
                 except Exception as e:
                     st.error(f"No se pudo entrenar con el Excel: {e}")
 
@@ -972,11 +1179,11 @@ with tab3:
 
 
 # =============================================================================
-# TAB 4 — Ingeniería / QC
+# TAB 4 — Ingeniería / QC (YA FUNCIONAL)
 # =============================================================================
 
 with tab4:
-    st.header("⚗️ Futura calculadora de Ingeniería de Biochar")
+    st.header("⚗️ Calculadoras de Ingeniería de Biochar (educativas)")
 
     col_eng1, col_eng2 = st.columns(2)
 
@@ -994,23 +1201,88 @@ with tab4:
         eng_capacidad = st.number_input("Capacidad reactor (kg/h)", 10, 1000, 100, 10, key="eng_capacidad")
 
     if st.button("⚖️ Calcular Balance Completo", type="primary", key="btn_balance_completo"):
-        st.write("✅ Botón funciona (Las funciones de balance/secuestro deben responder a un balance termoquímico riguroso con composición, O/C, H/C, rendimientos medidos, etc).")
+        with st.spinner("Calculando balance..."):
+            bal = calcular_balance_masa_energia(eng_feedstock, eng_humedad, eng_temperatura, eng_tiempo)
+            sec = calcular_secuestro_carbono(eng_feedstock, eng_temperatura, bal["rend_char_base"])
+
+            prod_char_kg_h = eng_capacidad * (bal["rend_char_humeda"] / 100.0)
+            prod_char_t_anio = prod_char_kg_h * 24 * 300 / 1000.0  # 300 días/año
+            co2_t_anio = prod_char_t_anio * sec["tC_por_tbiochar"] * 3.67
+
+            st.markdown("---")
+            cA, cB, cC = st.columns(3)
+            with cA:
+                st.metric("Rend. Biochar (base seca)", f"{bal['rend_char_base']:.1f}%")
+                st.metric("Rend. Biochar (biomasa húmeda)", f"{bal['rend_char_humeda']:.1f}%")
+                st.metric("Energía específica", f"{bal['energia_MJ_kg']:.2f} MJ/kg")
+            with cB:
+                st.metric("Rend. Bio-oil", f"{bal['rend_biooil']:.1f}%")
+                st.metric("Rend. Gas", f"{bal['rend_gas']:.1f}%")
+                st.metric("Fracción seca", f"{bal['seca_frac']*100:.1f}%")
+            with cC:
+                st.metric("Producción biochar", f"{prod_char_kg_h:.1f} kg/h")
+                st.metric("Producción anual biochar", f"{prod_char_t_anio:.1f} t/año")
+                st.metric("CO₂ secuestrado (aprox)", f"{co2_t_anio:.1f} tCO₂/año")
+
+            st.caption("Nota: calculadora simplificada/educativa. No sustituye balances termoquímicos con rendimientos medidos ni análisis elemental real.")
+
+            dist = pd.DataFrame({
+                "Producto": ["Biochar (base seca)", "Bio-oil", "Gas"],
+                "Porcentaje": [bal["rend_char_base"], bal["rend_biooil"], bal["rend_gas"]],
+            })
+            st.bar_chart(dist.set_index("Producto"))
+
+
+# =============================================================================
+# PANEL INFERIOR (estado)
+# =============================================================================
+
+st.markdown("---")
+cI1, cI2, cI3 = st.columns(3)
+
+with cI1:
+    st.markdown("### 🔬 Método híbrido")
+    st.markdown("""
+- **QC:** score + gate + factor de confianza (penaliza dosis si QC bajo)
+- **Reglas:** determinístico/Excel (si está disponible)
+- **ML:** XGBoost con pipeline (imputer + one-hot)
+- **Ingeniería:** calculadora educativa de balance/secuestro
+""")
+
+with cI2:
+    st.markdown("### 📋 Estado del sistema")
+    if st.session_state.get("modelo_activo", False):
+        st.success(f"✅ ML activo | R²={st.session_state.r2_score:.3f} | MAE={st.session_state.mae_score:.2f}")
+        info = st.session_state.get("ml_info", {})
+        if info:
+            st.caption(f"n_total={info.get('n_total')} | train={info.get('n_train')} | test={info.get('n_test')}")
+    else:
+        st.warning("⚠️ ML inactivo (solo QC + reglas)")
+
+    if datos_excel is not None:
+        st.success("✅ Excel/KB cargado")
+    else:
+        st.info("Excel no cargado (opcional)")
+
+with cI3:
+    st.markdown("### 🧾 Nota técnica")
+    st.markdown("""
+- El **R² holdout** con datasets pequeños puede ser inestable.
+- Evitamos `dropna()` global: el pipeline imputa faltantes.
+- Se eliminan columnas tipo **Fuente/DOI** para evitar fuga/“memorización”.
+""")
 
 # =============================================================================
 # FOOTER
 # =============================================================================
+
 st.markdown("---")
 st.markdown(
     f"""
     <div style='text-align:center;color:#666;padding:0.9rem;'>
     <b>Prescriptor Híbrido Biochar {APP_VERSION} 🌱⚗️</b><br>
-    QC (biochar) + reglas + XGBoost (pipeline) • NanoMof 2025 ©️
+    QC + reglas + ingeniería educativa + XGBoost (pipeline) • NanoMof 2025 ©️
     </div>
     """,
     unsafe_allow_html=True
 )
-
-
-
-
-
