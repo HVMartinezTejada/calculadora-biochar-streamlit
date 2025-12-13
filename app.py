@@ -67,6 +67,10 @@ def strip_accents(s: str) -> str:
     )
 
 def norm_tamano(label: str) -> str:
+    """
+    Normaliza a Fino/Medio/Grueso para reglas determinísticas,
+    pero el ML puede usar Tamaño_biochar con strings del dataset (<1 mm, 1-3 mm, etc.)
+    """
     s = (label or "").strip().lower()
     if s.startswith("fino"):
         return "Fino"
@@ -74,12 +78,48 @@ def norm_tamano(label: str) -> str:
         return "Medio"
     if s.startswith("grueso"):
         return "Grueso"
-    # casos típicos de dataset: "<2 mm", "1-3 mm", etc.
-    if "<" in s or "0." in s or "1" in s:
+
+    # casos típicos de dataset: "<0.5 mm", "<1 mm", "<2 mm", "1-3 mm", "2-4 mm", "3-6 mm", etc.
+    if "<" in s or "0." in s:
         return "Fino"
-    if "2" in s or "3" in s or "4" in s or "5" in s:
+    if "1-3" in s or "1 - 3" in s or "1–3" in s:
         return "Medio"
+    if "2-4" in s or "2 - 4" in s or "2–4" in s or "2-5" in s or "3-6" in s:
+        return "Medio"
+    if ">5" in s or "grande" in s:
+        return "Grueso"
     return "Medio"
+
+def norm_textura(label: str) -> str:
+    s = (label or "").strip()
+    s0 = strip_accents(s).lower()
+    if s0 == "arena":
+        return "Arenoso"
+    return s
+
+def norm_objetivo(label: str) -> str:
+    """
+    Mapea sinónimos UI -> categorías típicas de dataset para reducir unknown category.
+    """
+    s = (label or "").strip()
+    s0 = strip_accents(s).lower()
+
+    if "fert" in s0:
+        return "Fertilidad"
+    if "rem" in s0:
+        return "Remediación"
+    if "resil" in s0:
+        return "Resiliencia"
+    if "secu" in s0:
+        return "Secuestro"
+    if "estruct" in s0:
+        return "Estructura"
+    if "patog" in s0:
+        return "Supresión patógenos"
+    return s
+
+def norm_feedstock(label: str) -> str:
+    return (label or "").strip()
 
 def is_flor(cultivo: str) -> bool:
     s = (cultivo or "").lower()
@@ -97,6 +137,66 @@ def safe_float(x, default=np.nan) -> float:
         return default
 
 # =============================================================================
+# UI CATEGORIES (base + dataset-driven)
+# =============================================================================
+
+BASE_FEEDSTOCKS = [
+    "Madera", "Cáscara cacao", "Cáscara café", "Cáscara coco",
+    "Paja trigo", "Paja arroz", "Paja",
+    "Cáscara arroz",
+    "Bambú",
+    "Estiércol", "Estiércol vacuno",
+    "Lodo papel",
+    "Bagazo caña",
+    "Hueso aceituna",
+    "Residuo forestal",
+    "Algas marinas",
+    "Otro",
+]
+
+BASE_TEXTURAS = [
+    "Arenoso", "Franco-arenoso", "Franco", "Franco-arcilloso", "Arcilloso",
+    "Franco-limoso", "Franco-limoso-arenoso", "Franco-arcillo-arenoso",
+    "Ultisol", "Turba", "Chernozem", "Histosol", "Litosol",
+    "Otro",
+]
+
+BASE_OBJETIVOS = [
+    # dataset-primero
+    "Fertilidad", "Remediación", "Resiliencia", "Secuestro", "Estructura",
+    # UI extra (se normaliza a dataset cuando aplica)
+    "Resiliencia hídrica", "Secuestro carbono", "Supresión patógenos",
+]
+
+BASE_TAMANOS_BIOCHAR = [
+    # categorías típicas de dataset
+    "<0.5 mm", "<1 mm", "<2 mm",
+    "1-3 mm", "1-5 mm",
+    "2-4 mm", "2-5 mm",
+    "3-6 mm",
+    ">5 mm",
+    "Otro",
+]
+
+def _dedup_keep_order(seq):
+    seen = set()
+    out = []
+    for x in seq:
+        if x is None:
+            continue
+        s = str(x).strip()
+        if not s:
+            continue
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+def get_ui_options(base_list, session_key: str):
+    extra = st.session_state.get(session_key, [])
+    return _dedup_keep_order(list(base_list) + list(extra))
+
+# =============================================================================
 # (a) LECTURA ROBUSTA CSV + (b) NORMALIZACIÓN DE COLUMNAS
 # =============================================================================
 
@@ -108,29 +208,39 @@ _CANON_COL_MAP = {
     # suelo
     "ph": "ph",
     "ph_suelo": "ph",
-    "pH_suelo": "ph",
+    "phdel_suelo": "ph",
     "mo": "mo",
     "materia_organica": "mo",
-    "materia_organica_%": "mo",
+    "materia_organica_pct": "mo",
     "materia_organica___": "mo",
 
     # biochar
     "t_pirolysis": "T_pirolisis",
     "t_pirolisis": "T_pirolisis",
     "t_pirólisis": "T_pirolisis",
-    "t_pirólisis": "T_pirolisis",
     "temperatura_pirolysis": "T_pirolisis",
     "temperatura_pirolisis": "T_pirolisis",
+    "t_pirólisis": "T_pirolisis",
 
     "ph_biochar": "pH_biochar",
-    "pH_biochar": "pH_biochar",
+    "phbiochar": "pH_biochar",
 
     "area_bet": "Area_BET",
-    "área_bet": "Area_BET",
     "area_superficial": "Area_BET",
     "area_superficial_bet": "Area_BET",
+    "área_bet": "Area_BET",
+    "área_bet_m2_g": "Area_BET",
+    "área_bet_m2g": "Area_BET",
+    "área_bet__m2_g_": "Area_BET",
+    "área_bet_": "Area_BET",
+    "área_bet__": "Area_BET",
+    "área_bet__m2_g": "Area_BET",
+    "área_bet_m2/g": "Area_BET",
+    "área_bet_m2g": "Area_BET",
+    "área_bet_m2_g": "Area_BET",
+    "área_bet_m2g": "Area_BET",
+    "área_bet": "Area_BET",
     "Área_BET": "Area_BET",
-    "Área_bet": "Area_BET",
 
     "tamano_biochar": "Tamaño_biochar",
     "tamaño_biochar": "Tamaño_biochar",
@@ -152,27 +262,28 @@ def canonicalize_column_name(col: str) -> str:
     s = strip_accents(raw)
     s = s.replace("%", "_pct")
     s = s.replace(" ", "_").replace("-", "_").replace("/", "_")
-    s = s.replace("__", "_").replace("__", "_").strip("_")
-
+    while "__" in s:
+        s = s.replace("__", "_")
+    s = s.strip("_")
     key = s.lower()
     return _CANON_COL_MAP.get(key, raw)
 
 def normalize_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    new_cols = []
-    for c in df.columns:
-        new_cols.append(canonicalize_column_name(c))
-    df.columns = new_cols
+    df.columns = [canonicalize_column_name(c) for c in df.columns]
 
-    # coerciones numéricas esperadas
     for num_col in ["ph", "mo", "T_pirolisis", "pH_biochar", "Area_BET", "dosis_efectiva"]:
         if num_col in df.columns:
             df[num_col] = pd.to_numeric(df[num_col], errors="coerce")
 
+    # trims suaves en categóricas comunes
+    for c in ["Feedstock", "Textura", "Objetivo", "Tamaño_biochar", "Estado_suelo", "Fuente"]:
+        if c in df.columns:
+            df[c] = df[c].astype(str).str.strip()
+
     return df
 
 def detect_csv_separator(sample_text: str) -> str:
-    # toma 1ra línea con contenido y decide por conteo
     lines = [ln for ln in sample_text.splitlines() if ln.strip()]
     if not lines:
         return ","
@@ -180,16 +291,10 @@ def detect_csv_separator(sample_text: str) -> str:
     return ";" if first.count(";") > first.count(",") else ","
 
 def robust_read_csv_from_upload(uploaded_file) -> pd.DataFrame:
-    """
-    Lee CSV desde st.file_uploader con:
-    - detección de separador (, o ;)
-    - fallback de encodings típicos (utf-8-sig, utf-8, latin1)
-    """
     raw_bytes = uploaded_file.getvalue()
     encodings = ["utf-8-sig", "utf-8", "latin1"]
     last_err = None
 
-    # primero intentamos decodificar un pedazo para detectar sep
     sep = ","
     for enc in encodings:
         try:
@@ -203,17 +308,13 @@ def robust_read_csv_from_upload(uploaded_file) -> pd.DataFrame:
         try:
             text = raw_bytes.decode(enc)
             bio = io.StringIO(text)
-            df = pd.read_csv(bio, sep=sep)
-            return df
+            return pd.read_csv(bio, sep=sep)
         except Exception as e:
             last_err = e
 
     raise ValueError(f"No se pudo leer el CSV (encoding/sep). Último error: {last_err}")
 
 def split_features_and_metadata(df: pd.DataFrame, metadata_cols: Optional[List[str]] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Devuelve (df_features, df_metadata) preservando metadata (p.ej. Fuente) sin usarla como feature.
-    """
     metadata_cols = metadata_cols or []
     meta_present = [c for c in metadata_cols if c in df.columns]
     df_meta = df[meta_present].copy() if meta_present else pd.DataFrame(index=df.index)
@@ -558,7 +659,6 @@ def calcular_balance_masa_energia(feedstock: str, humedad: float, temperatura: f
     y_oil = 100.0 * f["yield_oil"]
     y_gas = float(np.clip(100.0 - y_char - y_oil, 0, 100))
 
-    # proxy energía requerida (MJ/kg biomasa húmeda) — educativo
     energia = 1.5 * max(0, (temperatura - 20)) * (tiempo_residencia_min / 60.0) / 100.0
 
     return {
@@ -585,7 +685,7 @@ def calcular_secuestro_carbono(feedstock: str, temperatura: float, rendimiento_b
     f_feed = factores_feedstock.get(feedstock, 0.80)
 
     carbono_retenido_pct = carbono_inicial_pct * (rendimiento_biochar_pct / 100.0) * f_feed * f_temp
-    sec_C_ton_por_ton_biomasa = carbono_retenido_pct / 100.0  # t C / t biomasa (proxy)
+    sec_C_ton_por_ton_biomasa = carbono_retenido_pct / 100.0
     return {
         "carbono_retenido_pct": float(carbono_retenido_pct),
         "secuestro_tC_t": float(sec_C_ton_por_ton_biomasa),
@@ -593,24 +693,15 @@ def calcular_secuestro_carbono(feedstock: str, temperatura: float, rendimiento_b
     }
 
 # =============================================================================
-# ML — ENTRENAMIENTO (c) excluyendo Fuente pero guardando metadata
+# ML — ENTRENAMIENTO (excluyendo Fuente pero guardando metadata)
 # =============================================================================
 
 def entrenar_modelo_xgb_pipeline(df_raw: pd.DataFrame, target: str = "dosis_efectiva") -> Tuple[Pipeline, float, List[str], pd.DataFrame]:
-    """
-    Retorna:
-    - pipe entrenado
-    - r2 holdout
-    - expected_cols
-    - metadata (ej. Fuente) alineada a las filas usadas
-    """
     if target not in df_raw.columns:
         raise ValueError(f"El dataset debe incluir la columna '{target}'")
 
-    # separa metadata, sin usarla como feature
     df_feat, df_meta = split_features_and_metadata(df_raw, metadata_cols=["Fuente"])
 
-    # filtra únicamente filas con target válido (sin tocar features)
     y = pd.to_numeric(df_feat[target], errors="coerce")
     keep = y.notna()
     df_feat = df_feat.loc[keep].copy()
@@ -662,10 +753,6 @@ def entrenar_modelo_xgb_pipeline(df_raw: pd.DataFrame, target: str = "dosis_efec
     return pipe, float(r2), expected_cols, df_meta
 
 def build_flat_features_for_model(suelo: dict, biochar: dict, cultivo_d: dict, objetivo: str) -> Dict[str, Any]:
-    """
-    Produce un dict con varias claves equivalentes para “enganchar”
-    con datasets que usan nombres distintos.
-    """
     flat: Dict[str, Any] = {}
 
     # suelo (UI)
@@ -675,23 +762,20 @@ def build_flat_features_for_model(suelo: dict, biochar: dict, cultivo_d: dict, o
     flat["Textura"] = suelo.get("Textura")
     flat["Metales"] = suelo.get("Metales")
 
-    # suelo (dataset canónico)
+    # suelo (dataset)
     flat["ph"] = suelo.get("pH")
     flat["mo"] = suelo.get("MO")
     flat["Estado_suelo"] = suelo.get("Estado_suelo", None)
 
-    # biochar (UI)
+    # biochar (UI + dataset)
     flat["Feedstock"] = biochar.get("Feedstock")
     flat["T_pirolisis"] = biochar.get("T_pirolisis")
     flat["pH_biochar"] = biochar.get("pH_biochar")
     flat["BET"] = biochar.get("BET")
-    flat["Tamaño"] = biochar.get("Tamaño")
 
-    # biochar (dataset canónico)
-    flat["T_pirolisis"] = biochar.get("T_pirolisis")
     flat["Area_BET"] = biochar.get("BET")
-    flat["Tamaño_biochar"] = biochar.get("Tamaño")  # por compatibilidad
-    flat["Tamaño_biochar"] = biochar.get("Tamaño_biochar", flat["Tamaño_biochar"])
+    flat["Tamaño"] = biochar.get("Tamaño")  # Fino/Medio/Grueso (reglas)
+    flat["Tamaño_biochar"] = biochar.get("Tamaño_biochar")  # string del dataset (ML)
 
     # cultivo
     flat["Tipo"] = cultivo_d.get("Tipo")
@@ -776,6 +860,11 @@ if "train_metadata" not in st.session_state:
 if "parametros_usuario" not in st.session_state:
     st.session_state.parametros_usuario = {}
 
+# categorías “extra” desde dataset (para expandir UI)
+for k in ["ui_feedstocks_extra", "ui_texturas_extra", "ui_objetivos_extra", "ui_tamanos_extra"]:
+    if k not in st.session_state:
+        st.session_state[k] = []
+
 # Autoentreno opcional (solo si el usuario lo pidió)
 if auto_train and (not st.session_state.modelo_activo) and datos_excel is not None:
     try:
@@ -788,6 +877,16 @@ if auto_train and (not st.session_state.modelo_activo) and datos_excel is not No
             st.session_state.expected_cols = expected_cols
             st.session_state.train_metadata = meta
             st.session_state.modelo_activo = True
+
+            # extraer categorías para UI desde excel entrenado
+            if "Feedstock" in df0n.columns:
+                st.session_state["ui_feedstocks_extra"] = sorted(df0n["Feedstock"].dropna().astype(str).str.strip().unique().tolist())
+            if "Textura" in df0n.columns:
+                st.session_state["ui_texturas_extra"] = sorted(df0n["Textura"].dropna().astype(str).str.strip().unique().tolist())
+            if "Objetivo" in df0n.columns:
+                st.session_state["ui_objetivos_extra"] = sorted(df0n["Objetivo"].dropna().astype(str).str.strip().unique().tolist())
+            if "Tamaño_biochar" in df0n.columns:
+                st.session_state["ui_tamanos_extra"] = sorted(df0n["Tamaño_biochar"].dropna().astype(str).str.strip().unique().tolist())
     except Exception:
         pass
 
@@ -826,23 +925,44 @@ with tab1:
 
     c1, c2, c3 = st.columns(3)
 
+    # --- opciones dinámicas (dataset-driven)
+    textura_opts = get_ui_options(BASE_TEXTURAS, "ui_texturas_extra")
+    feedstock_opts = get_ui_options(BASE_FEEDSTOCKS, "ui_feedstocks_extra")
+    objetivo_opts = get_ui_options(BASE_OBJETIVOS, "ui_objetivos_extra")
+    tamano_opts = get_ui_options(BASE_TAMANOS_BIOCHAR, "ui_tamanos_extra")
+
     with c1:
         st.subheader("🏜️ Suelo")
         ph_suelo = st.slider("pH del suelo", 3.5, 9.5, 6.5, 0.1)
         mo_suelo = st.slider("Materia Orgánica (%)", 0.1, 10.0, 2.0, 0.1)
         cic_suelo = st.slider("CIC (cmolc/kg)", 2.0, 50.0, 15.0, 0.5)
-        textura = st.selectbox("Textura", ["Arena", "Franco-arenoso", "Franco", "Franco-arcilloso", "Arcilloso"])
+        textura_ui = st.selectbox(
+            "Textura",
+            textura_opts,
+            index=(textura_opts.index("Franco") if "Franco" in textura_opts else 0),
+        )
         metales = st.number_input("Metales pesados (mg/kg)", 0.0, 500.0, 0.0, 1.0)
+
+        textura = norm_textura(textura_ui)
 
     with c2:
         st.subheader("🌿 Biochar (básico)")
-        feedstock = st.selectbox("Materia prima", [
-            "Madera", "Cáscara cacao", "Paja trigo", "Bambú",
-            "Estiércol", "Paja arroz", "Cáscara arroz", "Lodo papel", "Otro"
-        ])
+        feedstock_ui = st.selectbox(
+            "Materia prima",
+            feedstock_opts,
+            index=(feedstock_opts.index("Madera") if "Madera" in feedstock_opts else 0),
+        )
+        feedstock = norm_feedstock(feedstock_ui)
+
         temp_pirolisis = st.slider("Temperatura pirólisis (°C)", 300, 900, 550, 10)
         ph_biochar = st.slider("pH del biochar", 5.0, 12.0, 9.0, 0.1)
-        tamaño_ui = st.selectbox("Tamaño partícula", ["Fino (<1 mm)", "Medio (1-5 mm)", "Grueso (>5 mm)"])
+
+        # Tamaño alineado con dataset (para ML) + derivado Fino/Medio/Grueso (para reglas)
+        tamano_biochar_ui = st.selectbox(
+            "Tamaño biochar",
+            tamano_opts,
+            index=(tamano_opts.index("1-3 mm") if "1-3 mm" in tamano_opts else 0),
+        )
         area_bet = st.slider("Área superficial BET (m²/g)", 10, 600, 300, 10)
 
         if modo_experto:
@@ -871,7 +991,13 @@ with tab1:
 
     with c3:
         st.subheader("🌱 Agronomía")
-        objetivo = st.selectbox("Objetivo", ["Fertilidad", "Remediación", "Resiliencia hídrica", "Secuestro carbono", "Supresión patógenos"])
+        objetivo_ui = st.selectbox(
+            "Objetivo",
+            objetivo_opts,
+            index=(objetivo_opts.index("Fertilidad") if "Fertilidad" in objetivo_opts else 0),
+        )
+        objetivo = norm_objetivo(objetivo_ui)
+
         cultivo = st.selectbox("Cultivo", [
             "Teff", "Hortalizas", "Trigo", "Girasol", "Maíz", "Pasto",
             "Cacao", "Frijol", "Palma", "Sorgo", "Tomate", "Soja",
@@ -902,16 +1028,27 @@ with tab1:
             objetivo_calidad = "No aplica"
             sensibilidad_salinidad = 1.5
 
-    suelo = {"pH": ph_suelo, "MO": mo_suelo, "CIC": cic_suelo, "Textura": textura, "Metales": metales}
+    suelo = {
+        "pH": ph_suelo,
+        "MO": mo_suelo,
+        "CIC": cic_suelo,
+        "Textura": textura,
+        "Metales": metales,
+    }
+
     biochar = {
         "Feedstock": feedstock,
         "T_pirolisis": temp_pirolisis,
         "pH_biochar": ph_biochar,
-        "Tamaño": norm_tamano(tamaño_ui),
         "BET": area_bet,
-        # compatibilidad dataset
-        "Tamaño_biochar": norm_tamano(tamaño_ui),
+
+        # reglas determinísticas
+        "Tamaño": norm_tamano(tamano_biochar_ui),
+
+        # ML (alineado a dataset)
+        "Tamaño_biochar": tamano_biochar_ui,
     }
+
     cultivo_d = {
         "Tipo": cultivo,
         "Riego": sistema_riego,
@@ -935,7 +1072,13 @@ with tab1:
             "O_C_ratio": oc_ratio,
         })
 
-    st.session_state.parametros_usuario = {"suelo": suelo, "biochar": biochar, "cultivo": cultivo_d, "objetivo": objetivo, "modo_experto": modo_experto}
+    st.session_state.parametros_usuario = {
+        "suelo": suelo,
+        "biochar": biochar,
+        "cultivo": cultivo_d,
+        "objetivo": objetivo,
+        "modo_experto": modo_experto
+    }
 
     qc = compute_qc_report(biochar)
     pill_class, pill_text = qc_pill(qc.score)
@@ -1025,8 +1168,8 @@ with tab1:
             with st.expander("📋 Detalles y trazabilidad", expanded=True):
                 st.markdown(f"""
 **Suelo:** pH={ph_suelo}, MO={mo_suelo}%, CIC={cic_suelo}, Textura={textura}, Metales={metales}  
-**Biochar:** Feedstock={feedstock}, T={temp_pirolisis}°C, pH={ph_biochar}, Tamaño={norm_tamano(tamaño_ui)}, BET={area_bet}  
-**Cultivo:** {cultivo} | Riego={sistema_riego} | Clima={clima} | Objetivo={objetivo}  
+**Biochar:** Feedstock={feedstock}, T={temp_pirolisis}°C, pH={ph_biochar}, Tamaño_biochar={tamano_biochar_ui}, BET={area_bet}  
+**Objetivo:** {objetivo}  
 **QC:** score={qc.score:.0f}, flags={", ".join(qc.flags) if qc.flags else "—"}
                 """)
                 if modo_experto:
@@ -1039,13 +1182,13 @@ with tab1:
                     "Dosis_final_t_ha", "Metodo", "QC_score", "QC_factor", "QC_flags",
                     "Objetivo", "Cultivo", "Riego", "Clima",
                     "pH_suelo", "MO", "CIC", "Textura", "Metales",
-                    "Feedstock", "T_pirolisis", "pH_biochar", "Tamaño", "BET",
+                    "Feedstock", "T_pirolisis", "pH_biochar", "Tamaño_biochar", "BET",
                 ],
                 "Valor": [
                     f"{dosis_final:.2f}", metodo, f"{qc.score:.0f}", f"{qc.confidence_factor:.2f}", "; ".join(qc.flags),
                     objetivo, cultivo, sistema_riego, clima,
                     ph_suelo, mo_suelo, cic_suelo, textura, metales,
-                    feedstock, temp_pirolisis, ph_biochar, norm_tamano(tamaño_ui), area_bet,
+                    feedstock, temp_pirolisis, ph_biochar, tamano_biochar_ui, area_bet,
                 ]
             })
 
@@ -1078,6 +1221,16 @@ El indicador de desempeño se calcula con un holdout (20% test).
         try:
             df_raw = robust_read_csv_from_upload(uploaded_csv)
             df_raw = normalize_dataframe_columns(df_raw)
+
+            # (2) Guardar categorías del dataset al cargarlo (para expandir UI y reducir unknown category)
+            if "Feedstock" in df_raw.columns:
+                st.session_state["ui_feedstocks_extra"] = sorted(df_raw["Feedstock"].dropna().astype(str).str.strip().unique().tolist())
+            if "Textura" in df_raw.columns:
+                st.session_state["ui_texturas_extra"] = sorted(df_raw["Textura"].dropna().astype(str).str.strip().unique().tolist())
+            if "Objetivo" in df_raw.columns:
+                st.session_state["ui_objetivos_extra"] = sorted(df_raw["Objetivo"].dropna().astype(str).str.strip().unique().tolist())
+            if "Tamaño_biochar" in df_raw.columns:
+                st.session_state["ui_tamanos_extra"] = sorted(df_raw["Tamaño_biochar"].dropna().astype(str).str.strip().unique().tolist())
 
             st.subheader("Vista previa (incluye metadata si existe)")
             st.dataframe(df_raw.head(20), use_container_width=True)
@@ -1121,6 +1274,17 @@ El indicador de desempeño se calcula con un holdout (20% test).
                 try:
                     with st.spinner("Entrenando..."):
                         df_excel_n = normalize_dataframe_columns(df_excel)
+
+                        # refrescar categorías desde Excel también
+                        if "Feedstock" in df_excel_n.columns:
+                            st.session_state["ui_feedstocks_extra"] = sorted(df_excel_n["Feedstock"].dropna().astype(str).str.strip().unique().tolist())
+                        if "Textura" in df_excel_n.columns:
+                            st.session_state["ui_texturas_extra"] = sorted(df_excel_n["Textura"].dropna().astype(str).str.strip().unique().tolist())
+                        if "Objetivo" in df_excel_n.columns:
+                            st.session_state["ui_objetivos_extra"] = sorted(df_excel_n["Objetivo"].dropna().astype(str).str.strip().unique().tolist())
+                        if "Tamaño_biochar" in df_excel_n.columns:
+                            st.session_state["ui_tamanos_extra"] = sorted(df_excel_n["Tamaño_biochar"].dropna().astype(str).str.strip().unique().tolist())
+
                         pipe, r2v, expected_cols, meta = entrenar_modelo_xgb_pipeline(df_excel_n, target="dosis_efectiva")
 
                         st.session_state.modelo_pipe = pipe
@@ -1173,10 +1337,14 @@ with tab4:
 
     col_eng1, col_eng2 = st.columns(2)
 
+    # usa la misma expansión de feedstock para reducir “sorpresas” entre pestañas
+    eng_feedstock_opts = get_ui_options(BASE_FEEDSTOCKS, "ui_feedstocks_extra")
+
     with col_eng1:
         eng_feedstock = st.selectbox(
             "Materia prima para cálculo",
-            ["Madera", "Cáscara cacao", "Paja trigo", "Bambú", "Estiércol"],
+            eng_feedstock_opts,
+            index=(eng_feedstock_opts.index("Madera") if "Madera" in eng_feedstock_opts else 0),
             key="eng_feedstock"
         )
         eng_humedad = st.slider("Humedad (%)", 5.0, 30.0, 10.0, 1.0, key="eng_humedad")
