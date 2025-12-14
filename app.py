@@ -674,7 +674,12 @@ def entrenar_modelo_xgb_pipeline(df_raw: pd.DataFrame, target: str = "dosis_efec
     if target not in df_raw.columns:
         raise ValueError(f"El dataset debe incluir la columna '{target}'")
 
-    df_feat, df_meta = split_features_and_metadata(df_raw, metadata_cols=["Fuente"])
+META_COLS = [
+    "Fuente","Fuente_raw","doi","ref_type","doi_format_ok","doi_url","ref_id","ref_quality",
+    "verification_status","verified_title","verified_journal","verified_year","verified_authors",
+    "verification_notes","Fuente_display","Fuente_status","Fuente_public"
+]
+df_feat, df_meta = split_features_and_metadata(df_raw, metadata_cols=META_COLS)
 
     y = pd.to_numeric(df_feat[target], errors="coerce")
     keep = y.notna()
@@ -1312,3 +1317,4 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
