@@ -11,7 +11,7 @@ import pandas as pd
 import streamlit as st
 
 import xgboost as xgb
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, KFold, GroupKFold, cross_val_score
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
@@ -24,12 +24,13 @@ warnings.filterwarnings("ignore")
 # CONFIG
 # =============================================================================
 
-APP_VERSION = "v3.2 (QC + XGBoost robusto + UI alineada a dataset)"
+APP_VERSION = "v3.3 (QC + XGBoost robusto + peso dinámico por calidad/estabilidad)"
 DEFAULT_EXCEL_PATH = "Biochar_Prescriptor_Sistema_Completo_v1.0.xlsx"
 
 st.set_page_config(page_title="Prescriptor Híbrido Biochar", layout="wide", page_icon="🌱")
 
-st.markdown("""
+st.markdown(
+    """
 <style>
     .main-header { font-size: 2.4rem; color: #2E7D32; margin-bottom: 0.3rem; }
     .sub-header  { color: #4b5563; margin-top: -0.6rem; margin-bottom: 1rem; }
@@ -52,22 +53,24 @@ st.markdown("""
     }
     .stButton > button { background-color: #4CAF50; color: white; font-weight: 700; border: none; border-radius: 6px; }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 # =============================================================================
 # UTILIDADES GENERALES
 # =============================================================================
 
+
 def strip_accents(s: str) -> str:
     if s is None:
         return ""
     s = str(s)
-    return "".join(
-        c for c in unicodedata.normalize("NFKD", s)
-        if not unicodedata.combining(c)
-    )
+    return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+
 
 _EMOJI_RE = re.compile(r"[\U00010000-\U0010ffff]", flags=re.UNICODE)
+
 
 def strip_emojis(s: Any) -> str:
     if s is None or (isinstance(s, float) and np.isnan(s)):
@@ -78,12 +81,13 @@ def strip_emojis(s: Any) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
+
 def clean_category_value(v: Any) -> Any:
     if v is None or (isinstance(v, float) and np.isnan(v)):
         return np.nan
-    s = strip_emojis(v)
-    s = s.strip()
+    s = strip_emojis(v).strip()
     return s if s else np.nan
+
 
 def safe_float(x, default=np.nan) -> float:
     try:
@@ -96,9 +100,9 @@ def safe_float(x, default=np.nan) -> float:
     except Exception:
         return default
 
+
 def norm_tamano(label: str) -> str:
-    s = (label or "").strip().lower()
-    s = strip_accents(s)
+    s = strip_accents((label or "").strip().lower())
 
     if s.startswith("fino"):
         return "Fino"
@@ -113,12 +117,17 @@ def norm_tamano(label: str) -> str:
         return "Medio"
     return "Medio"
 
+
 def is_flor(cultivo: str) -> bool:
     s = (cultivo or "").lower()
-    return any(k in s for k in ["rosa", "clavel", "crisant", "orquí", "orqui", "flor", "ornamental", "bulbo"])
+    return any(
+        k in s
+        for k in ["rosa", "clavel", "crisant", "orquí", "orqui", "flor", "ornamental", "bulbo"]
+    )
+
 
 def unique_sorted(values: List[Any]) -> List[str]:
-    out = []
+    out: List[str] = []
     seen = set()
     for v in values:
         v2 = clean_category_value(v)
@@ -129,39 +138,74 @@ def unique_sorted(values: List[Any]) -> List[str]:
             out.append(v2)
     return sorted(out, key=lambda x: strip_accents(x).lower())
 
+
 # =============================================================================
 # LISTAS UI (fallback) + UTILIDAD DE OPCIONES DINÁMICAS
 # =============================================================================
 
-DEFAULT_FEEDSTOCKS = unique_sorted([
-    "Madera", "Cáscara cacao", "Cáscara coco", "Cáscara café",
-    "Paja trigo", "Paja arroz", "Bambú", "Estiércol", "Cáscara arroz",
-    "Lodo papel", "Paja", "Turba", "Otro"
-])
+DEFAULT_FEEDSTOCKS = unique_sorted(
+    [
+        "Madera",
+        "Cáscara cacao",
+        "Cáscara coco",
+        "Cáscara café",
+        "Paja trigo",
+        "Paja arroz",
+        "Bambú",
+        "Estiércol",
+        "Cáscara arroz",
+        "Lodo papel",
+        "Paja",
+        "Turba",
+        "Otro",
+    ]
+)
 
-DEFAULT_TEXTURAS = unique_sorted([
-    "Arenoso", "Arena", "Franco-arenoso", "Franco", "Franco-limoso",
-    "Franco-arcilloso", "Franco-arcillo-arenoso", "Arcilloso",
-    "Ultisol", "Chernozem", "Turba"
-])
+DEFAULT_TEXTURAS = unique_sorted(
+    [
+        "Arenoso",
+        "Arena",
+        "Franco-arenoso",
+        "Franco",
+        "Franco-limoso",
+        "Franco-arcilloso",
+        "Franco-arcillo-arenoso",
+        "Arcilloso",
+        "Ultisol",
+        "Chernozem",
+        "Turba",
+    ]
+)
 
-DEFAULT_ESTADOS_SUELO = unique_sorted([
-    "Ácido", "Muy ácido", "Ligeramente ácido", "Ácido degradado", "Muy degradado",
-    "Contaminado", "Moderado", "Seco", "Alcalino", "Salino-sódico", "Ácido extremo"
-])
+DEFAULT_ESTADOS_SUELO = unique_sorted(
+    [
+        "Ácido",
+        "Muy ácido",
+        "Ligeramente ácido",
+        "Ácido degradado",
+        "Muy degradado",
+        "Contaminado",
+        "Moderado",
+        "Seco",
+        "Alcalino",
+        "Salino-sódico",
+        "Ácido extremo",
+    ]
+)
 
-DEFAULT_OBJETIVOS = unique_sorted([
-    "Fertilidad", "Remediación", "Resiliencia", "Secuestro", "Estructura", "Supresión patógenos"
-])
+DEFAULT_OBJETIVOS = unique_sorted(
+    ["Fertilidad", "Remediación", "Resiliencia", "Secuestro", "Estructura", "Supresión patógenos"]
+)
 
-DEFAULT_TAMANOS = unique_sorted([
-    "<0.5 mm", "<1 mm", "<2 mm", "1-3 mm", "2-4 mm", "2-5 mm", "3-6 mm",
-    "Fino", "Medio", "Grueso"
-])
+DEFAULT_TAMANOS = unique_sorted(
+    ["<0.5 mm", "<1 mm", "<2 mm", "1-3 mm", "2-4 mm", "2-5 mm", "3-6 mm", "Fino", "Medio", "Grueso", "Otro"]
+)
+
 
 def get_dataset_categories(colname: str) -> List[str]:
     cats = st.session_state.get("dataset_cats", {})
     return cats.get(colname, [])
+
 
 def ui_options(colname: str, defaults: List[str]) -> List[str]:
     ds = get_dataset_categories(colname)
@@ -170,68 +214,53 @@ def ui_options(colname: str, defaults: List[str]) -> List[str]:
         merged = [x for x in merged if x != "Otro"] + ["Otro"]
     return merged
 
+
 # =============================================================================
 # (a) LECTURA ROBUSTA CSV + (b) NORMALIZACIÓN DE COLUMNAS
 # =============================================================================
-
-META_COLS = [
-    "Fuente", "Fuente_raw", "doi", "ref_type", "doi_format_ok", "doi_url", "ref_id", "ref_quality",
-    "verification_status", "verified_title", "verified_journal", "verified_year", "verified_authors",
-    "verification_notes", "Fuente_display", "Fuente_status", "Fuente_public"
-]
 
 _CANON_COL_MAP = {
     # target
     "dosis_efectiva": "dosis_efectiva",
     "dosis": "dosis_efectiva",
-
     # suelo
     "ph": "ph",
     "ph_suelo": "ph",
     "mo": "mo",
+    "materia_organica": "mo",
+    "materia_organica_pct": "mo",
     "cic": "CIC",
     "metales": "Metales",
-
     # biochar
     "t_pirolisis": "T_pirolisis",
     "t_pirólisis": "T_pirolisis",
     "temperatura_pirolisis": "T_pirolisis",
     "temperatura_pirólisis": "T_pirolisis",
-
     "ph_biochar": "pH_biochar",
-
+    "bet": "Area_BET",
     "area_bet": "Area_BET",
     "área_bet": "Area_BET",
     "area_superficial_bet": "Area_BET",
-
-    "tamaño_biochar": "Tamaño_biochar",
+    "tamano": "Tamaño_biochar",
     "tamano_biochar": "Tamaño_biochar",
-
+    "tamaño_biochar": "Tamaño_biochar",
+    "tamano_raw": "Tamaño_raw",
+    "tamaño_raw": "Tamaño_raw",
     "feedstock": "Feedstock",
-
+    "materia_prima": "Feedstock",
+    # categóricas extra
     "estado_suelo": "Estado_suelo",
     "textura": "Textura",
     "objetivo": "Objetivo",
+    "tipo": "Tipo",
+    # metadata (si viene)
     "fuente": "Fuente",
-
-    # metadata extendida (mantener nombres exactos)
     "fuente_raw": "Fuente_raw",
-    "doi": "doi",
     "ref_type": "ref_type",
-    "doi_format_ok": "doi_format_ok",
-    "doi_url": "doi_url",
-    "ref_id": "ref_id",
     "ref_quality": "ref_quality",
     "verification_status": "verification_status",
-    "verified_title": "verified_title",
-    "verified_journal": "verified_journal",
-    "verified_year": "verified_year",
-    "verified_authors": "verified_authors",
-    "verification_notes": "verification_notes",
-    "fuente_display": "Fuente_display",
-    "fuente_status": "Fuente_status",
-    "fuente_public": "Fuente_public",
 }
+
 
 def canonicalize_column_name(col: str) -> str:
     raw = str(col).strip()
@@ -242,31 +271,21 @@ def canonicalize_column_name(col: str) -> str:
     key = s.lower()
     return _CANON_COL_MAP.get(key, raw)
 
+
 def normalize_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [canonicalize_column_name(c) for c in df.columns]
 
-    # coerciones numéricas esperadas
     for num_col in ["ph", "mo", "CIC", "Metales", "T_pirolisis", "pH_biochar", "Area_BET", "dosis_efectiva"]:
         if num_col in df.columns:
             df[num_col] = pd.to_numeric(df[num_col], errors="coerce")
 
-    # limpieza suave categóricas típicas y metadata textual básica
-    for cat_col in ["Feedstock", "Textura", "Estado_suelo", "Tamaño_biochar", "Objetivo", "Fuente",
-                    "Fuente_raw", "doi", "ref_type", "doi_url", "ref_id", "ref_quality",
-                    "verification_status", "verified_title", "verified_journal", "verified_year",
-                    "verified_authors", "verification_notes", "Fuente_display", "Fuente_status", "Fuente_public"]:
+    for cat_col in ["Feedstock", "Textura", "Estado_suelo", "Tamaño_biochar", "Objetivo", "Tipo", "Fuente"]:
         if cat_col in df.columns:
             df[cat_col] = df[cat_col].apply(clean_category_value)
 
-    # boolean-ish
-    if "doi_format_ok" in df.columns:
-        df["doi_format_ok"] = df["doi_format_ok"].astype(str).str.strip().str.lower().map(
-            {"true": True, "1": True, "yes": True, "si": True, "sí": True,
-             "false": False, "0": False, "no": False}
-        )
-
     return df
+
 
 def detect_csv_separator(sample_text: str) -> str:
     lines = [ln for ln in sample_text.splitlines() if ln.strip()]
@@ -274,6 +293,7 @@ def detect_csv_separator(sample_text: str) -> str:
         return ","
     first = lines[0]
     return ";" if first.count(";") > first.count(",") else ","
+
 
 def robust_read_csv_from_upload(uploaded_file) -> pd.DataFrame:
     raw_bytes = uploaded_file.getvalue()
@@ -283,7 +303,7 @@ def robust_read_csv_from_upload(uploaded_file) -> pd.DataFrame:
     sep = ","
     for enc in encodings:
         try:
-            preview = raw_bytes[:5000].decode(enc)
+            preview = raw_bytes[:8000].decode(enc)
             sep = detect_csv_separator(preview)
             break
         except Exception as e:
@@ -300,12 +320,16 @@ def robust_read_csv_from_upload(uploaded_file) -> pd.DataFrame:
 
     raise ValueError(f"No se pudo leer el CSV (encoding/sep). Último error: {last_err}")
 
-def split_features_and_metadata(df: pd.DataFrame, metadata_cols: Optional[List[str]] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
+
+def split_features_and_metadata(
+    df: pd.DataFrame, metadata_cols: Optional[List[str]] = None
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
     metadata_cols = metadata_cols or []
     meta_present = [c for c in metadata_cols if c in df.columns]
     df_meta = df[meta_present].copy() if meta_present else pd.DataFrame(index=df.index)
     df_feat = df.drop(columns=meta_present, errors="ignore").copy()
     return df_feat, df_meta
+
 
 def capture_dataset_categories(df_norm: pd.DataFrame) -> None:
     cats: Dict[str, List[str]] = st.session_state.get("dataset_cats", {})
@@ -314,6 +338,7 @@ def capture_dataset_categories(df_norm: pd.DataFrame) -> None:
             vals = unique_sorted(df_norm[col].dropna().tolist())
             cats[col] = vals
     st.session_state.dataset_cats = cats
+
 
 # =============================================================================
 # EXCEL (OPCIONAL)
@@ -342,6 +367,7 @@ def cargar_datos_excel(excel_path: str) -> Optional[Dict[str, pd.DataFrame]]:
         st.error(f"Error cargando Excel: {e}")
         return None
 
+
 # =============================================================================
 # QC REPORT
 # =============================================================================
@@ -354,12 +380,14 @@ class QCReport:
     flags: List[str]
     notes: List[str]
 
+
 def qc_pill(score: float) -> Tuple[str, str]:
     if score >= 80:
         return ("pill-ok", "QC alto")
     if score >= 55:
         return ("pill-warn", "QC medio")
     return ("pill-bad", "QC bajo")
+
 
 def compute_qc_report(p: Dict[str, Any]) -> QCReport:
     score = 100.0
@@ -408,7 +436,7 @@ def compute_qc_report(p: Dict[str, Any]) -> QCReport:
     hum = safe_float(p.get("Humedad_total"), default=np.nan)
     vol = safe_float(p.get("Volatiles"), default=np.nan)
     ash = safe_float(p.get("Cenizas_biomasa"), default=np.nan)
-    fc  = safe_float(p.get("Carbono_fijo"), default=np.nan)
+    fc = safe_float(p.get("Carbono_fijo"), default=np.nan)
 
     if all(np.isfinite(v) for v in [hum, vol, ash, fc]):
         cierre = hum + vol + ash + fc
@@ -474,8 +502,9 @@ def compute_qc_report(p: Dict[str, Any]) -> QCReport:
         confidence_factor=confidence_factor,
         can_prescribe=can_prescribe,
         flags=flags,
-        notes=notes
+        notes=notes,
     )
+
 
 # =============================================================================
 # REGLAS DETERMINÍSTICAS
@@ -491,14 +520,18 @@ def parse_coeficientes(coef_str: Any) -> Dict[str, float]:
             coefs[k.strip()] = safe_float(v, default=0.0)
     return coefs
 
-def aplicar_factores_excel(factores_df: pd.DataFrame, objetivo: str, suelo: dict, biochar: dict, cultivo: dict) -> float:
+
+def aplicar_factores_excel(
+    factores_df: pd.DataFrame, objetivo: str, suelo: dict, biochar: dict, cultivo: dict
+) -> float:
     if factores_df is None or factores_df.empty:
         return 1.0
 
     df = factores_df.copy()
     cols = {c.lower(): c for c in df.columns}
 
-    def col(name): return cols.get(name.lower())
+    def col(name):
+        return cols.get(name.lower())
 
     c_obj = col("objetivo")
     c_var = col("variable") or col("parametro") or col("nombre")
@@ -554,7 +587,10 @@ def aplicar_factores_excel(factores_df: pd.DataFrame, objetivo: str, suelo: dict
 
     return float(np.clip(f_total, 0.2, 5.0))
 
-def calcular_dosis_deterministica(objetivo: str, suelo: dict, biochar: dict, cultivo: dict, datos_excel: Optional[Dict[str, pd.DataFrame]]) -> float:
+
+def calcular_dosis_deterministica(
+    objetivo: str, suelo: dict, biochar: dict, cultivo: dict, datos_excel: Optional[Dict[str, pd.DataFrame]]
+) -> float:
     if datos_excel is None:
         base = 20.0
         ph = safe_float(suelo.get("pH"), 6.5)
@@ -566,7 +602,7 @@ def calcular_dosis_deterministica(objetivo: str, suelo: dict, biochar: dict, cul
             met = safe_float(suelo.get("Metales"), 0.0)
             base += 0.03 * met
 
-        t = norm_tamano(biochar.get("Tamaño", "Medio"))
+        t = norm_tamano(biochar.get("Tamaño_biochar", "Medio"))
         if t == "Fino":
             base *= 1.15
         elif t == "Grueso":
@@ -580,11 +616,14 @@ def calcular_dosis_deterministica(objetivo: str, suelo: dict, biochar: dict, cul
     if algoritmos is None or algoritmos.empty:
         return 20.0
 
+    if "Objetivo" not in algoritmos.columns:
+        return 20.0
+
     algo_row = algoritmos[algoritmos["Objetivo"].astype(str).str.strip().str.lower() == str(objetivo).strip().lower()]
     if algo_row.empty:
         return 20.0
 
-    constante = safe_float(algo_row["Constante"].iloc[0], default=20.0)
+    constante = safe_float(algo_row["Constante"].iloc[0], default=20.0) if "Constante" in algo_row.columns else 20.0
     coef_str = algo_row["Coeficientes"].iloc[0] if "Coeficientes" in algo_row.columns else None
     coefs = parse_coeficientes(coef_str)
 
@@ -597,13 +636,14 @@ def calcular_dosis_deterministica(objetivo: str, suelo: dict, biochar: dict, cul
 
     f_total = aplicar_factores_excel(factores, objetivo, suelo, biochar, cultivo)
 
-    t = norm_tamano(biochar.get("Tamaño", "Medio"))
+    t = norm_tamano(biochar.get("Tamaño_biochar", "Medio"))
     if t == "Fino":
         f_total *= 1.15
     elif t == "Grueso":
         f_total *= 0.90
 
     return float(np.clip(dosis_base * f_total, 5, 50))
+
 
 def calcular_dosis_flores(suelo: dict, biochar: dict, flor: dict) -> float:
     dosis_base = 12.0
@@ -635,17 +675,20 @@ def calcular_dosis_flores(suelo: dict, biochar: dict, flor: dict) -> float:
 
     return float(np.clip(dosis_base * factor_sistema, 5, 30))
 
+
 # =============================================================================
 # CALCULADORAS (Ingeniería) — versión educativa
 # =============================================================================
 
-def calcular_balance_masa_energia(feedstock: str, humedad: float, temperatura: float, tiempo_residencia_min: float) -> Dict[str, float]:
+def calcular_balance_masa_energia(
+    feedstock: str, humedad: float, temperatura: float, tiempo_residencia_min: float
+) -> Dict[str, float]:
     factores_biomasa = {
-        "Madera":        {"pci": 18.5, "yield_char": 0.25, "yield_oil": 0.40},
+        "Madera": {"pci": 18.5, "yield_char": 0.25, "yield_oil": 0.40},
         "Cáscara cacao": {"pci": 17.8, "yield_char": 0.28, "yield_oil": 0.38},
-        "Paja trigo":    {"pci": 15.2, "yield_char": 0.22, "yield_oil": 0.42},
-        "Bambú":         {"pci": 19.1, "yield_char": 0.30, "yield_oil": 0.35},
-        "Estiércol":     {"pci": 14.5, "yield_char": 0.35, "yield_oil": 0.30},
+        "Paja trigo": {"pci": 15.2, "yield_char": 0.22, "yield_oil": 0.42},
+        "Bambú": {"pci": 19.1, "yield_char": 0.30, "yield_oil": 0.35},
+        "Estiércol": {"pci": 14.5, "yield_char": 0.35, "yield_oil": 0.30},
     }
     f = factores_biomasa.get(feedstock, {"pci": 17.0, "yield_char": 0.25, "yield_oil": 0.40})
 
@@ -665,7 +708,10 @@ def calcular_balance_masa_energia(feedstock: str, humedad: float, temperatura: f
         "pci_MJ_kg_seco": f["pci"],
     }
 
-def calcular_secuestro_carbono(feedstock: str, temperatura: float, rendimiento_biochar_pct: float, carbono_inicial_pct: float = 48.0) -> Dict[str, float]:
+
+def calcular_secuestro_carbono(
+    feedstock: str, temperatura: float, rendimiento_biochar_pct: float, carbono_inicial_pct: float = 48.0
+) -> Dict[str, float]:
     if temperatura < 400:
         f_temp = 0.6
         vida = 50
@@ -687,33 +733,153 @@ def calcular_secuestro_carbono(feedstock: str, temperatura: float, rendimiento_b
         "vida_media_anios": float(vida),
     }
 
+
 # =============================================================================
-# ML — ENTRENAMIENTO (robusto por ESQUEMA)
+# ML — ENTRENAMIENTO (robusto por ESQUEMA) + metadata + CV
 # =============================================================================
 
 SCHEMA_NUM_COLS = [
-    "ph", "mo", "CIC", "Metales",
-    "T_pirolisis", "pH_biochar", "Area_BET",
+    "ph",
+    "mo",
+    "CIC",
+    "Metales",
+    "T_pirolisis",
+    "pH_biochar",
+    "Area_BET",
     "Sensibilidad_salinidad",
-    "Humedad_total", "Volatiles", "Cenizas_biomasa", "Carbono_fijo",
-    "O2_ppm", "O2_temp_exposicion", "H_C_ratio", "O_C_ratio",
+    "Humedad_total",
+    "Volatiles",
+    "Cenizas_biomasa",
+    "Carbono_fijo",
+    "O2_ppm",
+    "O2_temp_exposicion",
+    "H_C_ratio",
+    "O_C_ratio",
 ]
 
 FORCE_CATEGORICAL_COLS = {
-    "Tipo", "Cultivo",
-    "Textura", "Feedstock", "Estado_suelo", "Tamaño_biochar", "Objetivo",
-    "Riego", "Clima", "Sistema_cultivo", "Tipo_producto", "Objetivo_calidad",
-    "Metodo_enfriamiento"
+    "Tipo",
+    "Cultivo",
+    "Textura",
+    "Feedstock",
+    "Estado_suelo",
+    "Tamaño_biochar",
+    "Objetivo",
+    "Riego",
+    "Clima",
+    "Sistema_cultivo",
+    "Tipo_producto",
+    "Objetivo_calidad",
+    "Metodo_enfriamiento",
+    "Fuente",
 }
 
-def entrenar_modelo_xgb_pipeline(df_raw: pd.DataFrame, target: str = "dosis_efectiva") -> Tuple[Pipeline, float, List[str], pd.DataFrame]:
+META_COLS = [
+    "Fuente",
+    "Fuente_raw",
+    "doi",
+    "ref_type",
+    "doi_format_ok",
+    "doi_url",
+    "ref_id",
+    "ref_quality",
+    "verification_status",
+    "verified_title",
+    "verified_journal",
+    "verified_year",
+    "verified_authors",
+    "verification_notes",
+    "Fuente_display",
+    "Fuente_status",
+    "Fuente_public",
+]
+
+
+def build_preprocessor(num_cols: List[str], cat_cols: List[str]) -> ColumnTransformer:
+    num_pipe = Pipeline(steps=[("imputer", SimpleImputer(strategy="median"))])
+    cat_pipe = Pipeline(
+        steps=[
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("oh", OneHotEncoder(handle_unknown="ignore")),
+        ]
+    )
+    pre = ColumnTransformer(
+        transformers=[("num", num_pipe, num_cols), ("cat", cat_pipe, cat_cols)],
+        remainder="drop",
+    )
+    return pre
+
+
+def make_xgb_model(random_state: int = 42) -> xgb.XGBRegressor:
+    return xgb.XGBRegressor(
+        objective="reg:squarederror",
+        n_estimators=420,
+        learning_rate=0.05,
+        max_depth=6,
+        subsample=0.9,
+        colsample_bytree=0.9,
+        random_state=random_state,
+    )
+
+
+def compute_peso_xgb(
+    r2_holdout: float,
+    cv_mean: Optional[float],
+    cv_std: Optional[float],
+    n_rows: int,
+    qc_score: float,
+) -> float:
+    if n_rows >= 350:
+        w = 0.65
+    elif n_rows >= 200:
+        w = 0.60
+    elif n_rows >= 120:
+        w = 0.50
+    else:
+        w = 0.40
+
+    perf = None
+    if cv_mean is not None and np.isfinite(cv_mean):
+        perf = float(cv_mean)
+    elif np.isfinite(r2_holdout):
+        perf = float(r2_holdout)
+
+    if perf is not None:
+        if perf >= 0.80:
+            w += 0.12
+        elif perf >= 0.70:
+            w += 0.08
+        elif perf >= 0.60:
+            w += 0.04
+        elif perf < 0.45:
+            w -= 0.15
+        elif perf < 0.55:
+            w -= 0.08
+
+    if cv_std is not None and np.isfinite(cv_std):
+        if cv_std > 0.20:
+            w -= 0.12
+        elif cv_std > 0.12:
+            w -= 0.07
+        elif cv_std < 0.06:
+            w += 0.03
+
+    if qc_score < 45:
+        w = min(w, 0.25)
+    elif qc_score < 60:
+        w = min(w, 0.35)
+
+    return float(np.clip(w, 0.15, 0.80))
+
+
+def entrenar_modelo_xgb_pipeline(
+    df_raw: pd.DataFrame, target: str = "dosis_efectiva", do_cv: bool = True
+) -> Tuple[Pipeline, float, List[str], pd.DataFrame, Dict[str, Any]]:
     if target not in df_raw.columns:
         raise ValueError(f"El dataset debe incluir la columna '{target}'")
 
-    # separa metadata, sin usarla como feature
     df_feat, df_meta = split_features_and_metadata(df_raw, metadata_cols=META_COLS)
 
-    # filtra filas con target válido
     y = pd.to_numeric(df_feat[target], errors="coerce")
     keep = y.notna()
     df_feat = df_feat.loc[keep].copy()
@@ -726,63 +892,68 @@ def entrenar_modelo_xgb_pipeline(df_raw: pd.DataFrame, target: str = "dosis_efec
     X = df_feat.drop(columns=[target]).copy()
     expected_cols = list(X.columns)
 
-    # --- ESQUEMA: numéricas por nombre; el resto categóricas
     num_cols = [c for c in expected_cols if c in SCHEMA_NUM_COLS]
     cat_cols = [c for c in expected_cols if c not in num_cols]
 
-    # fuerza categóricas
     for c in FORCE_CATEGORICAL_COLS:
         if c in num_cols:
             num_cols.remove(c)
             if c not in cat_cols:
                 cat_cols.append(c)
 
-    # coerción segura
     for c in num_cols:
         X[c] = pd.to_numeric(X[c], errors="coerce")
-
     for c in cat_cols:
         X[c] = X[c].apply(clean_category_value).astype(object)
 
-    num_pipe = Pipeline(steps=[("imputer", SimpleImputer(strategy="median"))])
-    cat_pipe = Pipeline(steps=[
-        ("imputer", SimpleImputer(strategy="most_frequent")),
-        ("oh", OneHotEncoder(handle_unknown="ignore")),
-    ])
-
-    pre = ColumnTransformer(
-        transformers=[
-            ("num", num_pipe, num_cols),
-            ("cat", cat_pipe, cat_cols),
-        ],
-        remainder="drop",
-    )
-
-    model = xgb.XGBRegressor(
-        objective="reg:squarederror",
-        n_estimators=400,
-        learning_rate=0.05,
-        max_depth=6,
-        subsample=0.9,
-        colsample_bytree=0.9,
-        random_state=42,
-    )
-
+    pre = build_preprocessor(num_cols, cat_cols)
+    model = make_xgb_model()
     pipe = Pipeline(steps=[("pre", pre), ("model", model)])
 
     Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, random_state=42)
-    if len(Xtr) == 0 or len(Xte) == 0:
-        raise ValueError("Split inválido: revisa tamaño del dataset para holdout.")
-
     pipe.fit(Xtr, ytr)
-    r2 = r2_score(yte, pipe.predict(Xte))
+    r2 = float(r2_score(yte, pipe.predict(Xte)))
 
-    return pipe, float(r2), expected_cols, df_meta
+    cv_mean = None
+    cv_std = None
+    cv_kind = "off"
+
+    if do_cv:
+        try:
+            groups = None
+            if "Fuente" in df_meta.columns:
+                groups = df_meta["Fuente"].fillna("NA").astype(str)
+
+            if groups is not None and groups.nunique() >= 3:
+                n_splits = min(5, groups.nunique())
+                splitter = GroupKFold(n_splits=n_splits)
+                scores = cross_val_score(pipe, X, y, scoring="r2", cv=splitter, groups=groups)
+                cv_kind = f"GroupKFold(n={n_splits})"
+            else:
+                splitter = KFold(n_splits=5, shuffle=True, random_state=42)
+                scores = cross_val_score(pipe, X, y, scoring="r2", cv=splitter)
+                cv_kind = "KFold(n=5)"
+
+            cv_mean = float(np.nanmean(scores))
+            cv_std = float(np.nanstd(scores))
+        except Exception:
+            cv_mean, cv_std, cv_kind = None, None, "failed"
+
+    metrics = {
+        "n_rows_used": int(len(X)),
+        "cv_r2_mean": cv_mean,
+        "cv_r2_std": cv_std,
+        "cv_kind": cv_kind,
+        "num_cols": num_cols,
+        "cat_cols": cat_cols,
+    }
+
+    return pipe, r2, expected_cols, df_meta, metrics
+
 
 def build_flat_features_for_model(suelo: dict, biochar: dict, cultivo_d: dict, objetivo: str) -> Dict[str, Any]:
     flat: Dict[str, Any] = {}
 
-    # suelo
     flat["ph"] = safe_float(suelo.get("pH"), np.nan)
     flat["mo"] = safe_float(suelo.get("MO"), np.nan)
     flat["CIC"] = safe_float(suelo.get("CIC"), np.nan)
@@ -790,7 +961,6 @@ def build_flat_features_for_model(suelo: dict, biochar: dict, cultivo_d: dict, o
     flat["Textura"] = clean_category_value(suelo.get("Textura"))
     flat["Estado_suelo"] = clean_category_value(suelo.get("Estado_suelo"))
 
-    # biochar
     flat["Feedstock"] = clean_category_value(biochar.get("Feedstock"))
     flat["T_pirolisis"] = safe_float(biochar.get("T_pirolisis"), np.nan)
     flat["pH_biochar"] = safe_float(biochar.get("pH_biochar"), np.nan)
@@ -798,7 +968,6 @@ def build_flat_features_for_model(suelo: dict, biochar: dict, cultivo_d: dict, o
     flat["Tamaño_biochar"] = clean_category_value(biochar.get("Tamaño_biochar"))
     flat["Objetivo"] = clean_category_value(objetivo)
 
-    # cultivo (por si entra como feature en datasets futuros)
     flat["Tipo"] = clean_category_value(cultivo_d.get("Tipo"))
     flat["Riego"] = clean_category_value(cultivo_d.get("Riego"))
     flat["Clima"] = clean_category_value(cultivo_d.get("Clima"))
@@ -807,13 +976,8 @@ def build_flat_features_for_model(suelo: dict, biochar: dict, cultivo_d: dict, o
     flat["Objetivo_calidad"] = clean_category_value(cultivo_d.get("Objetivo_calidad"))
     flat["Sensibilidad_salinidad"] = safe_float(cultivo_d.get("Sensibilidad_salinidad"), np.nan)
 
-    # experto (si aplica)
-    for k in ["Humedad_total", "Volatiles", "Cenizas_biomasa", "Carbono_fijo",
-              "O2_ppm", "O2_temp_exposicion", "H_C_ratio", "O_C_ratio", "Metodo_enfriamiento"]:
-        if k in biochar:
-            flat[k] = biochar.get(k)
-
     return flat
+
 
 def preparar_input_modelo(expected_cols: List[str], params_flat: Dict[str, Any]) -> pd.DataFrame:
     row = {}
@@ -824,17 +988,14 @@ def preparar_input_modelo(expected_cols: List[str], params_flat: Dict[str, Any])
             row[c] = clean_category_value(params_flat.get(c))
     return pd.DataFrame([row])
 
+
 # =============================================================================
 # UI — Sidebar: Excel opcional + autoentreno opcional
 # =============================================================================
 
 st.sidebar.markdown(f"### ⚙️ Configuración ({APP_VERSION})")
 
-excel_choice = st.sidebar.radio(
-    "Base Excel (opcional)",
-    ["Usar ruta por defecto", "Subir Excel", "No usar Excel"],
-    index=0
-)
+excel_choice = st.sidebar.radio("Base Excel (opcional)", ["Usar ruta por defecto", "Subir Excel", "No usar Excel"], index=0)
 
 excel_path = None
 uploaded_excel = None
@@ -856,10 +1017,9 @@ datos_excel = cargar_datos_excel(excel_path) if excel_path else None
 auto_train = st.sidebar.checkbox(
     "Autoentrenar XGBoost al iniciar (si hay dataset en Excel)",
     value=False,
-    help="Se activa si el Excel trae hoja 'Dosis_experimental' con 'dosis_efectiva'."
+    help="Se activa si el Excel trae hoja 'Dosis_experimental' con 'dosis_efectiva'.",
 )
 
-# header
 col1, col2 = st.columns([3, 1])
 with col1:
     st.markdown('<div class="main-header">🧬 Prescriptor Híbrido Biochar</div>', unsafe_allow_html=True)
@@ -879,7 +1039,15 @@ if "modelo_pipe" not in st.session_state:
 if "modelo_activo" not in st.session_state:
     st.session_state.modelo_activo = False
 if "r2_score" not in st.session_state:
-    st.session_state.r2_score = 0.0
+    st.session_state.r2_score = np.nan
+if "cv_r2_mean" not in st.session_state:
+    st.session_state.cv_r2_mean = np.nan
+if "cv_r2_std" not in st.session_state:
+    st.session_state.cv_r2_std = np.nan
+if "cv_kind" not in st.session_state:
+    st.session_state.cv_kind = "off"
+if "train_n" not in st.session_state:
+    st.session_state.train_n = 0
 if "expected_cols" not in st.session_state:
     st.session_state.expected_cols = []
 if "train_metadata" not in st.session_state:
@@ -896,9 +1064,15 @@ if auto_train and (not st.session_state.modelo_activo) and datos_excel is not No
         if df0 is not None and "dosis_efectiva" in df0.columns and len(df0) >= 10:
             df0n = normalize_dataframe_columns(df0)
             capture_dataset_categories(df0n)
-            pipe, r2v, expected_cols, meta = entrenar_modelo_xgb_pipeline(df0n, target="dosis_efectiva")
+            pipe, r2v, expected_cols, meta, metrics = entrenar_modelo_xgb_pipeline(df0n, target="dosis_efectiva", do_cv=True)
+
             st.session_state.modelo_pipe = pipe
             st.session_state.r2_score = r2v
+            st.session_state.cv_r2_mean = metrics.get("cv_r2_mean", np.nan)
+            st.session_state.cv_r2_std = metrics.get("cv_r2_std", np.nan)
+            st.session_state.cv_kind = metrics.get("cv_kind", "off")
+            st.session_state.train_n = metrics.get("n_rows_used", 0)
+
             st.session_state.expected_cols = expected_cols
             st.session_state.train_metadata = meta
             st.session_state.modelo_activo = True
@@ -909,12 +1083,7 @@ if auto_train and (not st.session_state.modelo_activo) and datos_excel is not No
 # TABS
 # =============================================================================
 
-tab1, tab2, tab3, tab4 = st.tabs([
-    "🎯 Prescripción Híbrida",
-    "📊 Entrenamiento XGBoost",
-    "📚 Base de Conocimiento",
-    "⚗️ Ingeniería / QC"
-])
+tab1, tab2, tab3, tab4 = st.tabs(["🎯 Prescripción Híbrida", "📊 Entrenamiento XGBoost", "📚 Base de Conocimiento", "⚗️ Ingeniería / QC"])
 
 # =============================================================================
 # TAB 1 — Prescripción
@@ -928,15 +1097,18 @@ with tab1:
         modo_experto = st.checkbox(
             "🔬 ACTIVAR MODO EXPERTO (QC + proceso)",
             value=False,
-            help="Activa inputs de O₂, enfriamiento, cierre proximal y ratios H/C y O/C."
+            help="Activa inputs de O₂, enfriamiento, cierre proximal y ratios H/C y O/C.",
         )
 
     if modo_experto:
-        st.markdown("""
+        st.markdown(
+            """
         <div class="expert-box">
         <b>Modo experto activo:</b> la prescripción se ajusta por QC (riesgo oxidación + estabilidad).
         </div>
-        """, unsafe_allow_html=True)
+        """,
+            unsafe_allow_html=True,
+        )
 
     c1, c2, c3 = st.columns(3)
 
@@ -978,7 +1150,7 @@ with tab1:
             metodo_enfriamiento = st.selectbox(
                 "Método de enfriamiento",
                 ["Cámara inerte", "Contacto indirecto", "En aire", "Agua directa", "Desconocido"],
-                index=0
+                index=0,
             )
 
             st.markdown("**Estabilidad (si tienes elemental):**")
@@ -989,13 +1161,31 @@ with tab1:
         st.subheader("🌱 Agronomía")
         objetivo = st.selectbox("Objetivo", ui_options("Objetivo", DEFAULT_OBJETIVOS))
 
-        cultivo = st.selectbox("Cultivo", [
-            "Teff", "Hortalizas", "Trigo", "Girasol", "Maíz", "Pasto",
-            "Cacao", "Frijol", "Palma", "Sorgo", "Tomate", "Soja",
-            "🌺 Rosas", "🌼 Claveles", "🌻 Crisantemos", "🌸 Orquídeas",
-            "💐 Flores cortadas", "🌷 Flores ornamentales", "🌹 Flores de bulbo",
-            "Otro"
-        ])
+        cultivo = st.selectbox(
+            "Cultivo",
+            [
+                "Teff",
+                "Hortalizas",
+                "Trigo",
+                "Girasol",
+                "Maíz",
+                "Pasto",
+                "Cacao",
+                "Frijol",
+                "Palma",
+                "Sorgo",
+                "Tomate",
+                "Soja",
+                "🌺 Rosas",
+                "🌼 Claveles",
+                "🌻 Crisantemos",
+                "🌸 Orquídeas",
+                "💐 Flores cortadas",
+                "🌷 Flores ornamentales",
+                "🌹 Flores de bulbo",
+                "Otro",
+            ],
+        )
         sistema_riego = st.selectbox("Riego", ["Gravedad", "Aspersión", "Goteo", "No irrigado"])
         clima = st.selectbox("Clima", ["Árido", "Semiárido", "Mediterráneo", "Tropical", "Templado"])
 
@@ -1004,13 +1194,18 @@ with tab1:
         if es_flor:
             st.markdown("---")
             st.subheader("🌺 Flores")
-            sistema_cultivo = st.radio("Sistema", ["Campo abierto", "Invernadero", "Maceta/Contenedor", "Hidroponía"], horizontal=True)
-            tipo_producto_floral = st.selectbox("Tipo producto", ["Flores cortadas", "Plantas en maceta", "Bulbos", "Follaje ornamental"])
+            sistema_cultivo = st.radio(
+                "Sistema", ["Campo abierto", "Invernadero", "Maceta/Contenedor", "Hidroponía"], horizontal=True
+            )
+            tipo_producto_floral = st.selectbox(
+                "Tipo producto", ["Flores cortadas", "Plantas en maceta", "Bulbos", "Follaje ornamental"]
+            )
             colf1, colf2 = st.columns(2)
             with colf1:
-                objetivo_calidad = st.selectbox("Objetivo calidad", [
-                    "Larga vida en florero", "Color intenso", "Tamaño de flor", "Longitud de tallo", "Producción todo el año"
-                ])
+                objetivo_calidad = st.selectbox(
+                    "Objetivo calidad",
+                    ["Larga vida en florero", "Color intenso", "Tamaño de flor", "Longitud de tallo", "Producción todo el año"],
+                )
             with colf2:
                 sensibilidad_salinidad = st.slider("Sensibilidad salinidad", 1.0, 3.0, 1.5, 0.1)
         else:
@@ -1019,23 +1214,9 @@ with tab1:
             objetivo_calidad = "No aplica"
             sensibilidad_salinidad = 1.5
 
-    suelo = {
-        "pH": ph_suelo,
-        "MO": mo_suelo,
-        "CIC": cic_suelo,
-        "Textura": textura,
-        "Estado_suelo": estado_suelo,
-        "Metales": metales
-    }
+    suelo = {"pH": ph_suelo, "MO": mo_suelo, "CIC": cic_suelo, "Textura": textura, "Estado_suelo": estado_suelo, "Metales": metales}
 
-    biochar = {
-        "Feedstock": feedstock,
-        "T_pirolisis": temp_pirolisis,
-        "pH_biochar": ph_biochar,
-        "BET": area_bet,
-        "Tamaño_biochar": tamano_ds,
-        "Tamaño": norm_tamano(tamano_ds),
-    }
+    biochar = {"Feedstock": feedstock, "T_pirolisis": temp_pirolisis, "pH_biochar": ph_biochar, "BET": area_bet, "Tamaño_biochar": tamano_ds}
 
     cultivo_d = {
         "Tipo": strip_emojis(cultivo),
@@ -1048,23 +1229,32 @@ with tab1:
     }
 
     if modo_experto:
-        biochar.update({
-            "Humedad_total": hum_total,
-            "Volatiles": volatiles,
-            "Cenizas_biomasa": cenizas_biomasa,
-            "Carbono_fijo": carbono_fijo,
-            "O2_ppm": o2_ppm,
-            "O2_temp_exposicion": o2_temp,
-            "Metodo_enfriamiento": metodo_enfriamiento,
-            "H_C_ratio": hc_ratio,
-            "O_C_ratio": oc_ratio,
-        })
+        biochar.update(
+            {
+                "Humedad_total": hum_total,
+                "Volatiles": volatiles,
+                "Cenizas_biomasa": cenizas_biomasa,
+                "Carbono_fijo": carbono_fijo,
+                "O2_ppm": o2_ppm,
+                "O2_temp_exposicion": o2_temp,
+                "Metodo_enfriamiento": metodo_enfriamiento,
+                "H_C_ratio": hc_ratio,
+                "O_C_ratio": oc_ratio,
+            }
+        )
 
-    st.session_state.parametros_usuario = {"suelo": suelo, "biochar": biochar, "cultivo": cultivo_d, "objetivo": objetivo, "modo_experto": modo_experto}
+    st.session_state.parametros_usuario = {
+        "suelo": suelo,
+        "biochar": biochar,
+        "cultivo": cultivo_d,
+        "objetivo": objetivo,
+        "modo_experto": modo_experto,
+    }
 
     qc = compute_qc_report(biochar)
     pill_class, pill_text = qc_pill(qc.score)
-    st.markdown(f"""
+    st.markdown(
+        f"""
     <div class="qc-box">
       <span class="qc-pill {pill_class}">{pill_text}</span>
       <span class="qc-pill pill-ok">Score: {qc.score:.0f}/100</span>
@@ -1074,7 +1264,9 @@ with tab1:
         {"<br>".join([f"• {n}" for n in qc.notes[:6]])}
       </div>
     </div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
     if not qc.can_prescribe:
         st.error("GATE activado: con O₂ alto + apagado con agua, la app no recomienda dosis.")
@@ -1103,13 +1295,13 @@ with tab1:
                     dosis_xgb = None
 
             if dosis_xgb is not None:
-                r2v = st.session_state.r2_score
-                peso_xgb = 0.6
-                if r2v < 0.5:
-                    peso_xgb = 0.3
-                if qc.score < 60:
-                    peso_xgb = min(peso_xgb, 0.35)
-
+                peso_xgb = compute_peso_xgb(
+                    r2_holdout=float(st.session_state.r2_score) if np.isfinite(st.session_state.r2_score) else 0.0,
+                    cv_mean=float(st.session_state.cv_r2_mean) if np.isfinite(st.session_state.cv_r2_mean) else None,
+                    cv_std=float(st.session_state.cv_r2_std) if np.isfinite(st.session_state.cv_r2_std) else None,
+                    n_rows=int(st.session_state.train_n or 0),
+                    qc_score=float(qc.score),
+                )
                 dosis_final = (1 - peso_xgb) * dosis_det_qc + peso_xgb * dosis_xgb
                 metodo = f"Híbrido (Det+QC + XGBoost | peso_xgb={peso_xgb:.2f})"
                 mostrar_xgb = True
@@ -1125,13 +1317,16 @@ with tab1:
                 st.markdown("### 🌸 **PRESCRIPCIÓN PARA FLORICULTURA**")
                 cc1, cc2, cc3 = st.columns([1, 2, 1])
                 with cc2:
-                    st.markdown(f"""
+                    st.markdown(
+                        f"""
                     <div class="floral-header">
                         <h1 style='color: #d63384;'>🌸 {dosis_final:.1f} t/Ha 🌸</h1>
                         <p style='color: #666;'><strong>Dosis recomendada para {cultivo}</strong></p>
                         <p style='color: #666;'>{metodo}</p>
                     </div>
-                    """, unsafe_allow_html=True)
+                    """,
+                        unsafe_allow_html=True,
+                    )
             else:
                 st.success(f"### 📊 Dosis Recomendada: **{dosis_final:.1f} t/Ha**")
                 st.caption(metodo)
@@ -1141,50 +1336,79 @@ with tab1:
                 st.metric("Determinístico", f"{dosis_det:.1f} t/Ha", delta=f"QC×{qc.confidence_factor:.2f} → {dosis_det_qc:.1f}")
             with r2c:
                 if mostrar_xgb:
-                    st.metric("XGBoost", f"{dosis_xgb:.1f} t/Ha", delta=f"R² (holdout): {st.session_state.r2_score:.3f}")
+                    hold = st.session_state.r2_score
+                    cvm = st.session_state.cv_r2_mean
+                    cvs = st.session_state.cv_r2_std
+                    extra = f"Holdout R²: {hold:.3f}"
+                    if np.isfinite(cvm):
+                        extra += f" | CV R²: {cvm:.3f}±{(cvs if np.isfinite(cvs) else 0):.3f}"
+                    st.metric("XGBoost", f"{dosis_xgb:.1f} t/Ha", delta=extra)
                 else:
                     st.metric("XGBoost", "—", delta="Modelo inactivo")
             with r3:
                 st.metric("QC Score", f"{qc.score:.0f}/100", delta=pill_text)
 
             with st.expander("📋 Detalles y trazabilidad", expanded=True):
-                st.markdown(f"""
+                st.markdown(
+                    f"""
 **Suelo:** pH={ph_suelo}, MO={mo_suelo}%, CIC={cic_suelo}, Textura={textura}, Estado={estado_suelo}, Metales={metales}  
 **Biochar:** Feedstock={feedstock}, T={temp_pirolisis}°C, pH={ph_biochar}, Tamaño={tamano_ds}, BET={area_bet}  
-**Cultivo:** {cultivo} | Riego={sistema_riego} | Clima={clima} | Objetivo={objetivo}  
+**Cultivo (Tipo):** {strip_emojis(cultivo)} | Riego={sistema_riego} | Clima={clima} | Objetivo={objetivo}  
 **QC:** score={qc.score:.0f}, flags={", ".join(qc.flags) if qc.flags else "—"}
-                """)
-                if modo_experto:
-                    st.markdown(f"""
-**Experto:** O₂={o2_ppm} ppm (Texp={o2_temp}°C) | Enfriamiento={metodo_enfriamiento} | Proximal cierre={cierre:.1f}% | H/C={hc_ratio} | O/C={oc_ratio}
-                    """)
+                    """
+                )
 
-            out = pd.DataFrame({
-                "Parámetro": [
-                    "Dosis_final_t_ha", "Metodo", "QC_score", "QC_factor", "QC_flags",
-                    "Objetivo", "Cultivo", "Riego", "Clima",
-                    "pH_suelo", "MO", "CIC", "Textura", "Estado_suelo", "Metales",
-                    "Feedstock", "T_pirolisis", "pH_biochar", "Tamaño_biochar", "BET",
-                ],
-                "Valor": [
-                    f"{dosis_final:.2f}", metodo, f"{qc.score:.0f}", f"{qc.confidence_factor:.2f}", "; ".join(qc.flags),
-                    objetivo, cultivo, sistema_riego, clima,
-                    ph_suelo, mo_suelo, cic_suelo, textura, estado_suelo, metales,
-                    feedstock, temp_pirolisis, ph_biochar, tamano_ds, area_bet,
-                ]
-            })
+            out = pd.DataFrame(
+                {
+                    "Parámetro": [
+                        "Dosis_final_t_ha",
+                        "Metodo",
+                        "QC_score",
+                        "QC_factor",
+                        "QC_flags",
+                        "Objetivo",
+                        "Tipo",
+                        "Riego",
+                        "Clima",
+                        "pH_suelo",
+                        "MO",
+                        "CIC",
+                        "Textura",
+                        "Estado_suelo",
+                        "Metales",
+                        "Feedstock",
+                        "T_pirolisis",
+                        "pH_biochar",
+                        "Tamaño_biochar",
+                        "BET",
+                    ],
+                    "Valor": [
+                        f"{dosis_final:.2f}",
+                        metodo,
+                        f"{qc.score:.0f}",
+                        f"{qc.confidence_factor:.2f}",
+                        "; ".join(qc.flags),
+                        objetivo,
+                        strip_emojis(cultivo),
+                        sistema_riego,
+                        clima,
+                        ph_suelo,
+                        mo_suelo,
+                        cic_suelo,
+                        textura,
+                        estado_suelo,
+                        metales,
+                        feedstock,
+                        temp_pirolisis,
+                        ph_biochar,
+                        tamano_ds,
+                        area_bet,
+                    ],
+                }
+            )
 
-            if modo_experto:
-                extra = pd.DataFrame({
-                    "Parámetro": ["O2_ppm", "O2_temp_exposicion", "Metodo_enfriamiento", "H_C_ratio", "O_C_ratio",
-                                 "Humedad_total", "Volatiles", "Cenizas_biomasa", "Carbono_fijo"],
-                    "Valor": [o2_ppm, o2_temp, metodo_enfriamiento, hc_ratio, oc_ratio,
-                              hum_total, volatiles, cenizas_biomasa, carbono_fijo]
-                })
-                out = pd.concat([out, extra], ignore_index=True)
-
-            csv = out.to_csv(index=False)
-            st.download_button("📥 Descargar resultados (CSV)", data=csv, file_name="prescripcion_biochar.csv", mime="text/csv")
+            csv_out = out.to_csv(index=False)
+            st.download_button("📥 Descargar resultados (CSV)", data=csv_out, file_name="prescripcion_biochar.csv", mime="text/csv")
 
 # =============================================================================
 # TAB 2 — Entrenamiento XGBoost
@@ -1209,20 +1433,41 @@ with tab2:
                 st.error("Falta la columna 'dosis_efectiva'.")
             else:
                 st.caption(f"Filas: {len(df_raw)} | Columnas: {len(df_raw.columns)}")
+                st.write("Columnas detectadas:", list(df_raw.columns))
+
+                do_cv = st.checkbox("Calcular CV (recomendado; usa GroupKFold si existe Fuente)", value=True)
 
                 if st.button("🚀 Entrenar XGBoost", type="primary"):
                     with st.spinner("Entrenando..."):
-                        pipe, r2v, expected_cols, meta = entrenar_modelo_xgb_pipeline(df_raw, target="dosis_efectiva")
+                        pipe, r2v, expected_cols, meta, metrics = entrenar_modelo_xgb_pipeline(
+                            df_raw, target="dosis_efectiva", do_cv=do_cv
+                        )
 
                         st.session_state.modelo_pipe = pipe
                         st.session_state.r2_score = r2v
+                        st.session_state.cv_r2_mean = metrics.get("cv_r2_mean", np.nan)
+                        st.session_state.cv_r2_std = metrics.get("cv_r2_std", np.nan)
+                        st.session_state.cv_kind = metrics.get("cv_kind", "off")
+                        st.session_state.train_n = metrics.get("n_rows_used", 0)
+
                         st.session_state.expected_cols = expected_cols
                         st.session_state.train_metadata = meta
                         st.session_state.modelo_activo = True
 
                     st.success("Modelo entrenado y activado ✅")
                     st.metric("R² (holdout)", f"{r2v:.4f}")
-                    st.caption(f"Columnas usadas por el modelo: {len(expected_cols)}")
+
+                    if np.isfinite(st.session_state.cv_r2_mean):
+                        st.metric(
+                            "R² (CV)",
+                            f"{st.session_state.cv_r2_mean:.4f}",
+                            delta=f"± {st.session_state.cv_r2_std:.4f} | {st.session_state.cv_kind}",
+                        )
+                    else:
+                        st.caption(f"CV: {st.session_state.cv_kind}")
+
+                    st.caption(f"Filas usadas: {st.session_state.train_n} | Columnas usadas por el modelo: {len(expected_cols)}")
+
                     if len(meta.columns) > 0:
                         st.info("Metadata preservada (no usada como feature): " + ", ".join(list(meta.columns)))
 
@@ -1244,21 +1489,35 @@ with tab2:
             st.warning("El Excel no trae 'Dosis_experimental' o está vacío.")
         else:
             st.caption(f"Filas en Dosis_experimental: {len(df_excel)}")
+            do_cv_excel = st.checkbox("Calcular CV al entrenar desde Excel", value=True, key="do_cv_excel")
             if st.button("🔄 Entrenar con Dosis_experimental del Excel"):
                 try:
                     with st.spinner("Entrenando..."):
                         df_excel_n = normalize_dataframe_columns(df_excel)
                         capture_dataset_categories(df_excel_n)
-                        pipe, r2v, expected_cols, meta = entrenar_modelo_xgb_pipeline(df_excel_n, target="dosis_efectiva")
+                        pipe, r2v, expected_cols, meta, metrics = entrenar_modelo_xgb_pipeline(
+                            df_excel_n, target="dosis_efectiva", do_cv=do_cv_excel
+                        )
 
                         st.session_state.modelo_pipe = pipe
                         st.session_state.r2_score = r2v
+                        st.session_state.cv_r2_mean = metrics.get("cv_r2_mean", np.nan)
+                        st.session_state.cv_r2_std = metrics.get("cv_r2_std", np.nan)
+                        st.session_state.cv_kind = metrics.get("cv_kind", "off")
+                        st.session_state.train_n = metrics.get("n_rows_used", 0)
+
                         st.session_state.expected_cols = expected_cols
                         st.session_state.train_metadata = meta
                         st.session_state.modelo_activo = True
 
                     st.success("Modelo entrenado con Excel ✅")
                     st.metric("R² (holdout)", f"{r2v:.4f}")
+                    if np.isfinite(st.session_state.cv_r2_mean):
+                        st.metric(
+                            "R² (CV)",
+                            f"{st.session_state.cv_r2_mean:.4f}",
+                            delta=f"± {st.session_state.cv_r2_std:.4f} | {st.session_state.cv_kind}",
+                        )
                 except Exception as e:
                     st.error(f"No se pudo entrenar con el Excel: {e}")
 
@@ -1293,11 +1552,7 @@ with tab4:
     col_eng1, col_eng2 = st.columns(2)
 
     with col_eng1:
-        eng_feedstock = st.selectbox(
-            "Materia prima para cálculo",
-            ["Madera", "Cáscara cacao", "Paja trigo", "Bambú", "Estiércol"],
-            key="eng_feedstock"
-        )
+        eng_feedstock = st.selectbox("Materia prima para cálculo", ["Madera", "Cáscara cacao", "Paja trigo", "Bambú", "Estiércol"], key="eng_feedstock")
         eng_humedad = st.slider("Humedad (%)", 5.0, 30.0, 10.0, 1.0, key="eng_humedad")
         eng_carbono = st.slider("Carbono en biomasa seca (%)", 30.0, 60.0, 48.0, 1.0, key="eng_carbono")
 
@@ -1335,10 +1590,7 @@ with tab4:
                 st.metric("Vida media (proxy)", f"{sec['vida_media_anios']:.0f} años")
 
             st.markdown("### 📈 Distribución de productos")
-            df_plot = pd.DataFrame({
-                "Producto": ["Biochar", "Bio-oil", "Gas"],
-                "Porcentaje": [bal["rend_biochar_pct"], bal["rend_biooil_pct"], bal["rend_gas_pct"]],
-            })
+            df_plot = pd.DataFrame({"Producto": ["Biochar", "Bio-oil", "Gas"], "Porcentaje": [bal["rend_biochar_pct"], bal["rend_biooil_pct"], bal["rend_gas_pct"]]})
             st.bar_chart(df_plot.set_index("Producto"))
 
 # =============================================================================
@@ -1353,5 +1605,5 @@ st.markdown(
     QC + reglas + XGBoost • NanoMof 2025 ©️
     </div>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
