@@ -74,7 +74,6 @@ def strip_emojis(s: Any) -> str:
         return ""
     s = str(s)
     s = _EMOJI_RE.sub("", s)
-    # limpia bullets/variantes comunes y espacios
     s = s.replace("•", " ").replace("·", " ").strip()
     s = re.sub(r"\s+", " ", s).strip()
     return s
@@ -108,12 +107,10 @@ def norm_tamano(label: str) -> str:
     if s.startswith("grueso"):
         return "Grueso"
 
-    # casos típicos tipo "<2 mm", "1-3 mm", "<0.5 mm"
     if "<" in s:
         return "Fino"
     if "-" in s:
         return "Medio"
-    # fallback
     return "Medio"
 
 def is_flor(cultivo: str) -> bool:
@@ -169,7 +166,6 @@ def get_dataset_categories(colname: str) -> List[str]:
 def ui_options(colname: str, defaults: List[str]) -> List[str]:
     ds = get_dataset_categories(colname)
     merged = unique_sorted((ds or []) + (defaults or []))
-    # deja "Otro" al final si existe
     if "Otro" in merged:
         merged = [x for x in merged if x != "Otro"] + ["Otro"]
     return merged
@@ -177,6 +173,12 @@ def ui_options(colname: str, defaults: List[str]) -> List[str]:
 # =============================================================================
 # (a) LECTURA ROBUSTA CSV + (b) NORMALIZACIÓN DE COLUMNAS
 # =============================================================================
+
+META_COLS = [
+    "Fuente", "Fuente_raw", "doi", "ref_type", "doi_format_ok", "doi_url", "ref_id", "ref_quality",
+    "verification_status", "verified_title", "verified_journal", "verified_year", "verified_authors",
+    "verification_notes", "Fuente_display", "Fuente_status", "Fuente_public"
+]
 
 _CANON_COL_MAP = {
     # target
@@ -187,6 +189,8 @@ _CANON_COL_MAP = {
     "ph": "ph",
     "ph_suelo": "ph",
     "mo": "mo",
+    "cic": "CIC",
+    "metales": "Metales",
 
     # biochar
     "t_pirolisis": "T_pirolisis",
@@ -195,17 +199,38 @@ _CANON_COL_MAP = {
     "temperatura_pirólisis": "T_pirolisis",
 
     "ph_biochar": "pH_biochar",
+
     "area_bet": "Area_BET",
     "área_bet": "Area_BET",
     "area_superficial_bet": "Area_BET",
+
     "tamaño_biochar": "Tamaño_biochar",
     "tamano_biochar": "Tamaño_biochar",
+
     "feedstock": "Feedstock",
 
     "estado_suelo": "Estado_suelo",
     "textura": "Textura",
     "objetivo": "Objetivo",
     "fuente": "Fuente",
+
+    # metadata extendida (mantener nombres exactos)
+    "fuente_raw": "Fuente_raw",
+    "doi": "doi",
+    "ref_type": "ref_type",
+    "doi_format_ok": "doi_format_ok",
+    "doi_url": "doi_url",
+    "ref_id": "ref_id",
+    "ref_quality": "ref_quality",
+    "verification_status": "verification_status",
+    "verified_title": "verified_title",
+    "verified_journal": "verified_journal",
+    "verified_year": "verified_year",
+    "verified_authors": "verified_authors",
+    "verification_notes": "verification_notes",
+    "fuente_display": "Fuente_display",
+    "fuente_status": "Fuente_status",
+    "fuente_public": "Fuente_public",
 }
 
 def canonicalize_column_name(col: str) -> str:
@@ -221,15 +246,25 @@ def normalize_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [canonicalize_column_name(c) for c in df.columns]
 
-    # coerciones numéricas esperadas (las demás se tratan por esquema en entrenamiento)
-    for num_col in ["ph", "mo", "T_pirolisis", "pH_biochar", "Area_BET", "dosis_efectiva"]:
+    # coerciones numéricas esperadas
+    for num_col in ["ph", "mo", "CIC", "Metales", "T_pirolisis", "pH_biochar", "Area_BET", "dosis_efectiva"]:
         if num_col in df.columns:
             df[num_col] = pd.to_numeric(df[num_col], errors="coerce")
 
-    # limpieza suave en categóricas típicas (si existen)
-    for cat_col in ["Feedstock", "Textura", "Estado_suelo", "Tamaño_biochar", "Objetivo", "Fuente"]:
+    # limpieza suave categóricas típicas y metadata textual básica
+    for cat_col in ["Feedstock", "Textura", "Estado_suelo", "Tamaño_biochar", "Objetivo", "Fuente",
+                    "Fuente_raw", "doi", "ref_type", "doi_url", "ref_id", "ref_quality",
+                    "verification_status", "verified_title", "verified_journal", "verified_year",
+                    "verified_authors", "verification_notes", "Fuente_display", "Fuente_status", "Fuente_public"]:
         if cat_col in df.columns:
             df[cat_col] = df[cat_col].apply(clean_category_value)
+
+    # boolean-ish
+    if "doi_format_ok" in df.columns:
+        df["doi_format_ok"] = df["doi_format_ok"].astype(str).str.strip().str.lower().map(
+            {"true": True, "1": True, "yes": True, "si": True, "sí": True,
+             "false": False, "0": False, "no": False}
+        )
 
     return df
 
@@ -462,6 +497,7 @@ def aplicar_factores_excel(factores_df: pd.DataFrame, objetivo: str, suelo: dict
 
     df = factores_df.copy()
     cols = {c.lower(): c for c in df.columns}
+
     def col(name): return cols.get(name.lower())
 
     c_obj = col("objetivo")
@@ -667,20 +703,17 @@ FORCE_CATEGORICAL_COLS = {
     "Tipo", "Cultivo",
     "Textura", "Feedstock", "Estado_suelo", "Tamaño_biochar", "Objetivo",
     "Riego", "Clima", "Sistema_cultivo", "Tipo_producto", "Objetivo_calidad",
-    "Metodo_enfriamiento", "Fuente"
+    "Metodo_enfriamiento"
 }
 
 def entrenar_modelo_xgb_pipeline(df_raw: pd.DataFrame, target: str = "dosis_efectiva") -> Tuple[Pipeline, float, List[str], pd.DataFrame]:
     if target not in df_raw.columns:
         raise ValueError(f"El dataset debe incluir la columna '{target}'")
 
-META_COLS = [
-    "Fuente","Fuente_raw","doi","ref_type","doi_format_ok","doi_url","ref_id","ref_quality",
-    "verification_status","verified_title","verified_journal","verified_year","verified_authors",
-    "verification_notes","Fuente_display","Fuente_status","Fuente_public"
-]
-df_feat, df_meta = split_features_and_metadata(df_raw, metadata_cols=META_COLS)
+    # separa metadata, sin usarla como feature
+    df_feat, df_meta = split_features_and_metadata(df_raw, metadata_cols=META_COLS)
 
+    # filtra filas con target válido
     y = pd.to_numeric(df_feat[target], errors="coerce")
     keep = y.notna()
     df_feat = df_feat.loc[keep].copy()
@@ -697,7 +730,7 @@ df_feat, df_meta = split_features_and_metadata(df_raw, metadata_cols=META_COLS)
     num_cols = [c for c in expected_cols if c in SCHEMA_NUM_COLS]
     cat_cols = [c for c in expected_cols if c not in num_cols]
 
-    # fuerza categóricas aunque pandas las haya inferido float por NaN
+    # fuerza categóricas
     for c in FORCE_CATEGORICAL_COLS:
         if c in num_cols:
             num_cols.remove(c)
@@ -765,7 +798,7 @@ def build_flat_features_for_model(suelo: dict, biochar: dict, cultivo_d: dict, o
     flat["Tamaño_biochar"] = clean_category_value(biochar.get("Tamaño_biochar"))
     flat["Objetivo"] = clean_category_value(objetivo)
 
-    # cultivo (por si existe en datasets futuros)
+    # cultivo (por si entra como feature en datasets futuros)
     flat["Tipo"] = clean_category_value(cultivo_d.get("Tipo"))
     flat["Riego"] = clean_category_value(cultivo_d.get("Riego"))
     flat["Clima"] = clean_category_value(cultivo_d.get("Clima"))
@@ -773,6 +806,12 @@ def build_flat_features_for_model(suelo: dict, biochar: dict, cultivo_d: dict, o
     flat["Tipo_producto"] = clean_category_value(cultivo_d.get("Tipo_producto"))
     flat["Objetivo_calidad"] = clean_category_value(cultivo_d.get("Objetivo_calidad"))
     flat["Sensibilidad_salinidad"] = safe_float(cultivo_d.get("Sensibilidad_salinidad"), np.nan)
+
+    # experto (si aplica)
+    for k in ["Humedad_total", "Volatiles", "Cenizas_biomasa", "Carbono_fijo",
+              "O2_ppm", "O2_temp_exposicion", "H_C_ratio", "O_C_ratio", "Metodo_enfriamiento"]:
+        if k in biochar:
+            flat[k] = biochar.get(k)
 
     return flat
 
@@ -999,7 +1038,7 @@ with tab1:
     }
 
     cultivo_d = {
-        "Tipo": strip_emojis(cultivo),  # <- quita emojis para no romper ML si algún día entra como feature
+        "Tipo": strip_emojis(cultivo),
         "Riego": sistema_riego,
         "Clima": clima,
         "Sistema_cultivo": sistema_cultivo,
@@ -1187,7 +1226,6 @@ with tab2:
                     if len(meta.columns) > 0:
                         st.info("Metadata preservada (no usada como feature): " + ", ".join(list(meta.columns)))
 
-                    # muestra categorías capturadas
                     with st.expander("📌 Categorías capturadas del dataset (para alinear UI)", expanded=False):
                         cats = st.session_state.get("dataset_cats", {})
                         for k, v in cats.items():
@@ -1317,4 +1355,3 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-
