@@ -6,6 +6,13 @@ scikit-learn
 openpyxl
 numpy
 
+# Google Sheets
+gspread
+google-auth
+
+# PDF (robusto)
+pdfplumber
+
 
 
 
