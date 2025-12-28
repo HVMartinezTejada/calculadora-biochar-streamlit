@@ -1766,6 +1766,9 @@ Este módulo está pensado para **mejorar la base de datos de manera controlada*
 5) Entrenas cuando quieras, o activas autoentreno cuando haya ≥ N filas validadas.
     """)
 
+    # -------------------------
+    # Guard-rails de GS
+    # -------------------------
     if not gs_enabled:
         st.info("Activa Google Sheets en el panel izquierdo para habilitar guardado persistente.")
     elif not _GS_AVAILABLE:
@@ -1773,32 +1776,57 @@ Este módulo está pensado para **mejorar la base de datos de manera controlada*
     elif not gs_sheet_id or not gs_worksheet:
         st.warning("Completa Sheet ID y Worksheet en el panel izquierdo (o en Secrets).")
     else:
-        pdf_file = st.file_uploader("Sube PDF del artículo", type=["pdf"], key="pdf_upl")
-        doi_manual = st.text_input("DOI (opcional)", value="", help="Si el PDF no lo trae claro, escribe el DOI aquí.")
+        # -------------------------
+        # Inputs (con keys únicas)
+        # -------------------------
+        pdf_file = st.file_uploader("Sube PDF del artículo", type=["pdf"], key="t5_pdf_upl")
+
+        doi_manual = st.text_input(
+            "DOI (opcional)",
+            value="",
+            help="Si el PDF no lo trae claro, escribe el DOI aquí.",
+            key="t5_doi_manual",
+        )
 
         colA, colB = st.columns([1, 1])
         with colA:
-            extract_btn = st.button("🔎 Extraer campos (heurístico)", type="primary", disabled=(pdf_file is None))
+            extract_btn = st.button(
+                "🔎 Extraer campos (heurístico)",
+                type="primary",
+                disabled=(pdf_file is None),
+                key="t5_extract_btn",
+            )
         with colB:
-            clear_btn = st.button("🧹 Limpiar extracción")
+            clear_btn = st.button("🧹 Limpiar extracción", key="t5_clear_btn")
 
         if clear_btn:
             st.session_state.pdf_extract = {}
 
+        # -------------------------
+        # Extracción heurística
+        # -------------------------
         if extract_btn and pdf_file is not None:
             try:
                 with st.spinner("Leyendo PDF y extrayendo..."):
                     txt = extract_text_from_pdf(pdf_file, max_pages=6)
                     fields = infer_fields_from_text(txt)
+
                     if doi_manual.strip():
                         fields["doi"] = doi_manual.strip()
+
                     fields["pdf_filename"] = pdf_file.name
                     fields["ingest_timestamp"] = now_iso()
+
+                    # Guardamos en session_state
                     st.session_state.pdf_extract = fields
+
                 st.success("Extracción realizada. Revisa y ajusta antes de guardar.")
             except Exception as e:
                 st.error(f"No se pudo extraer del PDF: {e}")
 
+        # -------------------------
+        # Confirmación (blindada con keys)
+        # -------------------------
         fields = st.session_state.get("pdf_extract", {}) or {}
         if fields:
             st.subheader("✅ Confirmación (antes de guardar)")
@@ -1810,33 +1838,147 @@ Este módulo está pensado para **mejorar la base de datos de manera controlada*
             ph_b = safe_float(fields.get("pH_biochar"), np.nan)
             bet = safe_float(fields.get("Area_BET"), np.nan)
             dosis = safe_float(fields.get("dosis_efectiva"), np.nan)
-            feed = fields.get("Feedstock", np.nan)
+
+            # Categóricas sugeridas desde extracción
+            feed_s = clean_category_value(fields.get("Feedstock"))
+            tex_s  = clean_category_value(fields.get("Textura"))
+            obj_s  = clean_category_value(fields.get("Objetivo"))
+            tam_s  = clean_category_value(fields.get("Tamaño_biochar"))
+
+            # Aviso si no se detectó dosis (o viene vacía/0)
+            if (not np.isfinite(dosis)) or (float(dosis) <= 0):
+                st.warning(
+                    "No se detectó una dosis en el PDF (o no está en t/ha). "
+                    "Ingresa la dosis manualmente abajo o guarda como BORRADOR."
+                )
+
+            # Helpers locales para preselección robusta
+            def _inject_and_index(options: List[str], suggested: Any) -> Tuple[List[str], int]:
+                """
+                Asegura que 'suggested' esté en options (si es válido) y devuelve index.
+                """
+                opts = list(options) if options else []
+                sug = clean_category_value(suggested)
+                if isinstance(sug, float) and np.isnan(sug):
+                    return opts, 0
+                if sug and (sug not in opts):
+                    opts = unique_sorted(opts + [sug])
+                idx = opts.index(sug) if (sug in opts) else 0
+                return opts, idx
 
             fcol1, fcol2, fcol3 = st.columns(3)
+
             with fcol1:
-                doi = st.text_input("doi", value=str(fields.get("doi","") or ""))
-                fuente = st.text_area("Fuente (texto corto)", value=str(fields.get("Fuente","") or ""), height=80)
-                verification_notes = st.text_area("Notas de verificación", value=str(fields.get("verification_notes","") or ""), height=80)
+                doi = st.text_input(
+                    "doi",
+                    value=str(fields.get("doi", "") or ""),
+                    key="t5_pdf_doi",
+                )
+                fuente = st.text_area(
+                    "Fuente (texto corto)",
+                    value=str(fields.get("Fuente", "") or ""),
+                    height=80,
+                    key="t5_pdf_fuente",
+                )
+                verification_notes = st.text_area(
+                    "Notas de verificación",
+                    value=str(fields.get("verification_notes", "") or ""),
+                    height=80,
+                    key="t5_pdf_verification_notes",
+                )
 
             with fcol2:
-                feedstock_v = st.selectbox("Feedstock", ui_options("Feedstock", DEFAULT_FEEDSTOCKS), index=0)
-                ph_soil_v = st.number_input("ph (suelo)", value=float(ph_s) if np.isfinite(ph_s) else 6.5, min_value=3.0, max_value=9.5, step=0.1)
-                mo_v = st.number_input("mo (Materia orgánica %)", value=float(mo_s) if np.isfinite(mo_s) else 2.0, min_value=0.0, max_value=20.0, step=0.1)
-                textura_v = st.selectbox("Textura", ui_options("Textura", DEFAULT_TEXTURAS), index=0)
+                feed_opts, feed_idx = _inject_and_index(ui_options("Feedstock", DEFAULT_FEEDSTOCKS), feed_s)
+                feedstock_v = st.selectbox(
+                    "Feedstock",
+                    feed_opts,
+                    index=feed_idx if len(feed_opts) else 0,
+                    key="t5_pdf_feedstock_v",
+                )
+
+                ph_soil_v = st.number_input(
+                    "ph (suelo)",
+                    value=float(ph_s) if np.isfinite(ph_s) else 6.5,
+                    min_value=3.0,
+                    max_value=9.5,
+                    step=0.1,
+                    key="t5_pdf_ph_soil_v",
+                )
+                mo_v = st.number_input(
+                    "mo (Materia orgánica %)",
+                    value=float(mo_s) if np.isfinite(mo_s) else 2.0,
+                    min_value=0.0,
+                    max_value=20.0,
+                    step=0.1,
+                    key="t5_pdf_mo_v",
+                )
+
+                tex_opts, tex_idx = _inject_and_index(ui_options("Textura", DEFAULT_TEXTURAS), tex_s)
+                textura_v = st.selectbox(
+                    "Textura",
+                    tex_opts,
+                    index=tex_idx if len(tex_opts) else 0,
+                    key="t5_pdf_textura_v",
+                )
 
             with fcol3:
-                T_v = st.number_input("T_pirolisis (°C)", value=float(t_p) if np.isfinite(t_p) else 550.0, min_value=250.0, max_value=950.0, step=10.0)
-                ph_bio_v = st.number_input("pH_biochar", value=float(ph_b) if np.isfinite(ph_b) else 9.0, min_value=3.0, max_value=14.0, step=0.1)
-                bet_v = st.number_input("Area_BET (m²/g)", value=float(bet) if np.isfinite(bet) else 300.0, min_value=0.0, max_value=2000.0, step=10.0)
-                dosis_v = st.number_input("dosis_efectiva (t/ha)", value=float(dosis) if np.isfinite(dosis) else 0.0, min_value=0.0, max_value=200.0, step=0.1)
+                T_v = st.number_input(
+                    "T_pirolisis (°C)",
+                    value=float(t_p) if np.isfinite(t_p) else 550.0,
+                    min_value=250.0,
+                    max_value=950.0,
+                    step=10.0,
+                    key="t5_pdf_T_v",
+                )
+                ph_bio_v = st.number_input(
+                    "pH_biochar",
+                    value=float(ph_b) if np.isfinite(ph_b) else 9.0,
+                    min_value=3.0,
+                    max_value=14.0,
+                    step=0.1,
+                    key="t5_pdf_ph_bio_v",
+                )
+                bet_v = st.number_input(
+                    "Area_BET (m²/g)",
+                    value=float(bet) if np.isfinite(bet) else 300.0,
+                    min_value=0.0,
+                    max_value=2000.0,
+                    step=10.0,
+                    key="t5_pdf_bet_v",
+                )
+                dosis_v = st.number_input(
+                    "dosis_efectiva (t/ha)",
+                    value=float(dosis) if np.isfinite(dosis) else 0.0,
+                    min_value=0.0,
+                    max_value=200.0,
+                    step=0.1,
+                    key="t5_pdf_dosis_v",
+                )
 
-            objetivo_v = st.selectbox("Objetivo", ui_options("Objetivo", DEFAULT_OBJETIVOS), index=0)
-            tamano_v = st.selectbox("Tamaño_biochar", ui_options("Tamaño_biochar", DEFAULT_TAMANOS), index=0)
+            obj_opts, obj_idx = _inject_and_index(ui_options("Objetivo", DEFAULT_OBJETIVOS), obj_s)
+            objetivo_v = st.selectbox(
+                "Objetivo",
+                obj_opts,
+                index=obj_idx if len(obj_opts) else 0,
+                key="t5_pdf_objetivo_v",
+            )
 
-            save_as_confirmed = st.checkbox("Guardar como VALIDADO (entra a entrenamiento)", value=(dosis_v > 0))
+            tam_opts, tam_idx = _inject_and_index(ui_options("Tamaño_biochar", DEFAULT_TAMANOS), tam_s)
+            tamano_v = st.selectbox(
+                "Tamaño_biochar",
+                tam_opts,
+                index=tam_idx if len(tam_opts) else 0,
+                key="t5_pdf_tamano_v",
+            )
+
+            save_as_confirmed = st.checkbox(
+                "Guardar como VALIDADO (entra a entrenamiento)",
+                value=(dosis_v > 0),
+                key="t5_pdf_save_as_confirmed",
+            )
             verification_status = "user_confirmed" if save_as_confirmed else "draft"
 
-            if not save_as_confirmed and dosis_v > 0:
+            if (not save_as_confirmed) and (dosis_v > 0):
                 st.info("Puedes marcarlo como validado si confirmas que esa dosis viene efectivamente del artículo.")
 
             row = {
@@ -1861,11 +2003,11 @@ Este módulo está pensado para **mejorar la base de datos de manera controlada*
             required_headers = unique_sorted(
                 list(row.keys()) +
                 META_COLS +
-                ["ph","mo","Textura","Feedstock","T_pirolisis","pH_biochar","Area_BET","Tamaño_biochar","Objetivo","dosis_efectiva"]
+                ["ph", "mo", "Textura", "Feedstock", "T_pirolisis", "pH_biochar", "Area_BET", "Tamaño_biochar", "Objetivo", "dosis_efectiva"]
             )
 
             st.markdown("---")
-            if st.button("💾 Guardar fila en Google Sheets", type="primary"):
+            if st.button("💾 Guardar fila en Google Sheets", type="primary", key="t5_pdf_btn_save_row"):
                 try:
                     gs_append_row(gs_sheet_id, gs_worksheet, row, required_headers=required_headers)
                     st.success("Fila guardada ✅")
@@ -1888,3 +2030,4 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
