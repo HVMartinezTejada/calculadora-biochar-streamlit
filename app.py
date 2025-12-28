@@ -5,6 +5,7 @@ import warnings
 import unicodedata
 from dataclasses import dataclass
 from typing import Dict, Any, List, Optional, Tuple
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -24,7 +25,7 @@ warnings.filterwarnings("ignore")
 # CONFIG
 # =============================================================================
 
-APP_VERSION = "v3.3 (QC + XGBoost robusto + UI alineada + explicación peso_xgb)"
+APP_VERSION = "v3.4 (QC + XGBoost robusto + PDF→Google Sheets + Secrets auto + test RW)"
 DEFAULT_EXCEL_PATH = "Biochar_Prescriptor_Sistema_Completo_v1.0.xlsx"
 
 st.set_page_config(page_title="Prescriptor Híbrido Biochar", layout="wide", page_icon="🌱")
@@ -51,6 +52,13 @@ st.markdown("""
         padding: 1.25rem; border-radius: 15px; border: 2px dashed #d63384; text-align: center; margin: 1rem 0;
     }
     .stButton > button { background-color: #4CAF50; color: white; font-weight: 700; border: none; border-radius: 6px; }
+    .hint {
+        background: #f3f4f6;
+        padding: 0.75rem 1rem;
+        border-radius: 10px;
+        border: 1px solid #e5e7eb;
+        color: #111827;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -81,8 +89,7 @@ def strip_emojis(s: Any) -> str:
 def clean_category_value(v: Any) -> Any:
     if v is None or (isinstance(v, float) and np.isnan(v)):
         return np.nan
-    s = strip_emojis(v)
-    s = s.strip()
+    s = strip_emojis(v).strip()
     return s if s else np.nan
 
 def safe_float(x, default=np.nan) -> float:
@@ -129,6 +136,21 @@ def unique_sorted(values: List[Any]) -> List[str]:
             out.append(v2)
     return sorted(out, key=lambda x: strip_accents(x).lower())
 
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+def extract_sheet_id(value: str) -> str:
+    """
+    Acepta ID directo o URL completa de Google Sheets y devuelve solo el sheet_id.
+    """
+    if not value:
+        return ""
+    s = str(value).strip()
+    m = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", s)
+    if m:
+        return m.group(1)
+    return s
+
 # =============================================================================
 # LISTAS UI (fallback) + UTILIDAD DE OPCIONES DINÁMICAS
 # =============================================================================
@@ -171,97 +193,52 @@ def ui_options(colname: str, defaults: List[str]) -> List[str]:
     return merged
 
 # =============================================================================
-# EXPLICACIÓN "DUMMY" PARA peso_xgb (visible en la app)
-# =============================================================================
-
-def explain_peso_xgb_for_users(
-    peso_xgb: float,
-    r2_holdout: Optional[float],
-    qc_score: float,
-    train_n: int = 0,
-    train_sources_n: Optional[int] = None
-) -> str:
-    """
-    Mensaje corto y accionable para no técnicos.
-    """
-    p = float(np.clip(peso_xgb, 0.0, 1.0))
-    ml_pct = int(round(p * 100))
-    rules_pct = 100 - ml_pct
-
-    # lectura rápida
-    if p >= 0.65:
-        lectura = "El modelo (XGBoost) está pesando más: se confía bastante en los datos."
-    elif p >= 0.45:
-        lectura = "La recomendación está balanceada: mezcla datos + reglas de forma prudente."
-    else:
-        lectura = "El sistema está siendo conservador con el modelo: pesan más las reglas + QC."
-
-    # por qué
-    motivos = []
-    if r2_holdout is not None:
-        if r2_holdout >= 0.8:
-            motivos.append("el modelo mostró buen desempeño en validación")
-        elif r2_holdout >= 0.6:
-            motivos.append("el modelo es aceptable, pero no sobresaliente")
-        else:
-            motivos.append("el desempeño del modelo es bajo")
-
-    if qc_score < 55:
-        motivos.append("el QC es bajo (más incertidumbre del material)")
-    elif qc_score < 80:
-        motivos.append("el QC es medio (hay señales de variabilidad)")
-    else:
-        motivos.append("el QC es alto (material más confiable)")
-
-    if train_n > 0:
-        motivos.append(f"entrenado con ~{train_n} casos")
-    if train_sources_n is not None and train_sources_n > 0:
-        motivos.append(f"{train_sources_n} fuentes")
-
-    motivos_txt = "; ".join(motivos)
-
-    # recomendación práctica (1 línea)
-    if p >= 0.65:
-        consejo = "Si el caso es similar a los datos, puedes tomar la dosis como punto principal y afinar en campo."
-    elif p >= 0.45:
-        consejo = "Úsala como dosis base y ajusta con tu criterio agronómico (especialmente si hay restricciones)."
-    else:
-        consejo = "Prioriza la dosis conservadora (reglas+QC) y valida con prueba piloto antes de escalar."
-
-    return (
-        f"**¿Qué significa `peso_xgb`?** {ml_pct}% de la dosis viene del modelo XGBoost y {rules_pct}% de reglas+QC. "
-        f"{lectura} (Se ajusta automáticamente por: {motivos_txt}). "
-        f"{consejo}"
-    )
-
-# =============================================================================
 # (a) LECTURA ROBUSTA CSV + (b) NORMALIZACIÓN DE COLUMNAS
 # =============================================================================
 
 _CANON_COL_MAP = {
+    # target
     "dosis_efectiva": "dosis_efectiva",
     "dosis": "dosis_efectiva",
 
+    # suelo
     "ph": "ph",
     "ph_suelo": "ph",
+    "phsuelo": "ph",
     "mo": "mo",
+    "materia_organica": "mo",
+    "materia_organica_pct": "mo",
+    "cic": "CIC",
+    "metales": "Metales",
 
+    # biochar
     "t_pirolisis": "T_pirolisis",
     "t_pirólisis": "T_pirolisis",
     "temperatura_pirolisis": "T_pirolisis",
     "temperatura_pirólisis": "T_pirolisis",
 
     "ph_biochar": "pH_biochar",
+    "bet": "Area_BET",
     "area_bet": "Area_BET",
     "área_bet": "Area_BET",
     "area_superficial_bet": "Area_BET",
+
     "tamaño_biochar": "Tamaño_biochar",
     "tamano_biochar": "Tamaño_biochar",
-    "feedstock": "Feedstock",
+    "tamaño": "Tamaño_biochar",
+    "tamano": "Tamaño_biochar",
 
+    "feedstock": "Feedstock",
+    "materia_prima": "Feedstock",
+
+    # categóricas
     "estado_suelo": "Estado_suelo",
     "textura": "Textura",
     "objetivo": "Objetivo",
+    "tipo": "Tipo",
+    "cultivo": "Tipo",  # si llega como "Cultivo" lo mapeamos a "Tipo"
+
+    # metadata
     "fuente": "Fuente",
 }
 
@@ -278,11 +255,14 @@ def normalize_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [canonicalize_column_name(c) for c in df.columns]
 
-    for num_col in ["ph", "mo", "T_pirolisis", "pH_biochar", "Area_BET", "dosis_efectiva"]:
+    # coerciones numéricas esperadas
+    for num_col in ["ph", "mo", "CIC", "Metales", "T_pirolisis", "pH_biochar", "Area_BET", "dosis_efectiva", "Sensibilidad_salinidad"]:
         if num_col in df.columns:
             df[num_col] = pd.to_numeric(df[num_col], errors="coerce")
 
-    for cat_col in ["Feedstock", "Textura", "Estado_suelo", "Tamaño_biochar", "Objetivo", "Fuente"]:
+    # limpieza suave en categóricas típicas
+    for cat_col in ["Feedstock", "Textura", "Estado_suelo", "Tamaño_biochar", "Objetivo", "Tipo", "Riego", "Clima", "Sistema_cultivo",
+                    "Tipo_producto", "Objetivo_calidad", "Metodo_enfriamiento", "Fuente"]:
         if cat_col in df.columns:
             df[cat_col] = df[cat_col].apply(clean_category_value)
 
@@ -334,6 +314,249 @@ def capture_dataset_categories(df_norm: pd.DataFrame) -> None:
             vals = unique_sorted(df_norm[col].dropna().tolist())
             cats[col] = vals
     st.session_state.dataset_cats = cats
+
+# =============================================================================
+# GOOGLE SHEETS (PERSISTENCIA)
+# =============================================================================
+
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    _GS_AVAILABLE = True
+except Exception:
+    gspread = None
+    Credentials = None
+    _GS_AVAILABLE = False
+
+def gs_get_client():
+    """
+    Requiere st.secrets["gcp_service_account"] con el JSON de la service account.
+    """
+    if not _GS_AVAILABLE:
+        raise RuntimeError("Dependencias de Google Sheets no instaladas (gspread/google-auth).")
+
+    if "gcp_service_account" not in st.secrets:
+        raise RuntimeError("Falta st.secrets['gcp_service_account'] (service account JSON).")
+
+    sa_info = st.secrets["gcp_service_account"]
+    if isinstance(sa_info, str):
+        import json as _json
+        sa_info = _json.loads(sa_info)
+
+    # scopes recomendados para leer/escribir Sheets y evitar sorpresas
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds = Credentials.from_service_account_info(sa_info, scopes=scopes)
+    client = gspread.authorize(creds)
+    return client
+
+def gs_open_worksheet(sh, worksheet_name: str, rows: int = 200, cols: int = 40):
+    """
+    Abre un worksheet. Si no existe, lo crea.
+    """
+    try:
+        return sh.worksheet(worksheet_name)
+    except Exception:
+        return sh.add_worksheet(title=worksheet_name, rows=str(rows), cols=str(cols))
+
+@st.cache_data(show_spinner=False, ttl=120)
+def gs_read_df(sheet_id: str, worksheet_name: str) -> pd.DataFrame:
+    client = gs_get_client()
+    sh = client.open_by_key(sheet_id)
+    ws = gs_open_worksheet(sh, worksheet_name)
+    values = ws.get_all_values()
+    if not values:
+        return pd.DataFrame()
+    headers = values[0]
+    rows = values[1:]
+    if not headers:
+        return pd.DataFrame()
+    if not rows:
+        return pd.DataFrame(columns=headers)
+    df = pd.DataFrame(rows, columns=headers)
+    return df
+
+def gs_ensure_headers(ws, required_headers: List[str]) -> List[str]:
+    headers = ws.row_values(1)
+    if not headers:
+        headers = required_headers
+        ws.append_row(headers)
+        return headers
+
+    missing = [h for h in required_headers if h not in headers]
+    if missing:
+        headers_extended = headers + missing
+        ws.add_cols(len(missing))
+        ws.update("1:1", [headers_extended])
+        headers = headers_extended
+    return headers
+
+def gs_append_row(sheet_id: str, worksheet_name: str, row_dict: Dict[str, Any], required_headers: List[str]) -> None:
+    client = gs_get_client()
+    sh = client.open_by_key(sheet_id)
+    ws = gs_open_worksheet(sh, worksheet_name)
+
+    headers = gs_ensure_headers(ws, required_headers)
+
+    row = []
+    for h in headers:
+        v = row_dict.get(h, "")
+        if v is None or (isinstance(v, float) and np.isnan(v)):
+            v = ""
+        row.append(str(v))
+    ws.append_row(row, value_input_option="USER_ENTERED")
+
+def gs_test_read_write(sheet_id: str, data_ws: str, test_ws: str = "healthcheck") -> Dict[str, Any]:
+    """
+    Prueba segura:
+    - Lee data_ws (cuenta filas/columnas)
+    - Escribe 1 fila en test_ws (healthcheck) con timestamp
+    """
+    client = gs_get_client()
+    sh = client.open_by_key(sheet_id)
+
+    # lectura del ws de datos
+    ws_data = gs_open_worksheet(sh, data_ws)
+    vals = ws_data.get_all_values()
+    n_rows = max(0, len(vals) - 1) if vals else 0
+    n_cols = len(vals[0]) if vals and len(vals) > 0 else 0
+
+    # escritura en ws de test
+    ws_test = gs_open_worksheet(sh, test_ws)
+    headers = gs_ensure_headers(ws_test, ["ping_timestamp", "note"])
+    ws_test.append_row([now_iso(), "streamlit_ping_ok"], value_input_option="USER_ENTERED")
+
+    last = ws_test.get_all_values()[-1] if ws_test.get_all_values() else []
+
+    return {
+        "data_rows": n_rows,
+        "data_cols": n_cols,
+        "test_ws": test_ws,
+        "last_test_row": last,
+    }
+
+# =============================================================================
+# PDF → extracción heurística (para revisión humana)
+# =============================================================================
+
+try:
+    import pdfplumber
+    _PDFPLUMBER_OK = True
+except Exception:
+    pdfplumber = None
+    _PDFPLUMBER_OK = False
+
+try:
+    import PyPDF2
+    _PYPDF2_OK = True
+except Exception:
+    PyPDF2 = None
+    _PYPDF2_OK = False
+
+_DOI_RE = re.compile(r"(10\.\d{4,9}/[-._;()/:A-Z0-9]+)", re.IGNORECASE)
+
+def extract_text_from_pdf(uploaded_pdf, max_pages: int = 6) -> str:
+    raw = uploaded_pdf.getvalue()
+    if _PDFPLUMBER_OK:
+        text_parts = []
+        with pdfplumber.open(io.BytesIO(raw)) as pdf:
+            for i, page in enumerate(pdf.pages[:max_pages]):
+                t = page.extract_text() or ""
+                if t.strip():
+                    text_parts.append(t)
+        return "\n".join(text_parts)
+
+    if _PYPDF2_OK:
+        reader = PyPDF2.PdfReader(io.BytesIO(raw))
+        text_parts = []
+        for i, page in enumerate(reader.pages[:max_pages]):
+            t = page.extract_text() or ""
+            if t.strip():
+                text_parts.append(t)
+        return "\n".join(text_parts)
+
+    raise RuntimeError("No hay librerías para leer PDF (instala pdfplumber o PyPDF2).")
+
+def _pick_first_number_in_range(nums: List[float], lo: float, hi: float) -> Optional[float]:
+    for n in nums:
+        if lo <= n <= hi:
+            return float(n)
+    return None
+
+def infer_fields_from_text(text: str) -> Dict[str, Any]:
+    """
+    Heurísticas conservadoras. Se espera que el usuario confirme/edite.
+    """
+    out: Dict[str, Any] = {}
+
+    # DOI
+    m = _DOI_RE.search(text or "")
+    if m:
+        out["doi"] = m.group(1).strip()
+
+    # Normaliza texto para buscar números
+    t = (text or "").replace(",", ".")
+    # Captura números sueltos
+    all_nums = [float(x) for x in re.findall(r"(?<!\d)(\d{1,4}(?:\.\d+)?)", t)]
+    # Temperaturas probables (°C)
+    temps = [float(x) for x in re.findall(r"(\d{3,4})\s*°?\s*C", t, flags=re.IGNORECASE)]
+    # BET
+    m_bet = re.search(r"\bBET\b[^0-9]{0,25}(\d{1,4}(?:\.\d+)?)\s*(?:m2/g|m²/g|m\^2/g)", t, flags=re.IGNORECASE)
+    if m_bet:
+        out["Area_BET"] = float(m_bet.group(1))
+    # pH: intenta biochar vs suelo por contexto
+    ph_matches = list(re.finditer(r"\bpH\b[^0-9]{0,10}(\d(?:\.\d+)?)", t, flags=re.IGNORECASE))
+    for mm in ph_matches:
+        val = float(mm.group(1))
+        window = t[max(0, mm.start()-30): mm.end()+30].lower()
+        if "biochar" in window or "char" in window:
+            if "pH_biochar" not in out:
+                out["pH_biochar"] = val
+        else:
+            if "ph" not in out:
+                out["ph"] = val
+
+    # Temperatura de pirólisis
+    mT = re.search(r"(pyrolys|pirol)[^0-9]{0,40}(\d{3,4})\s*°?\s*C", t, flags=re.IGNORECASE)
+    if mT:
+        out["T_pirolisis"] = float(mT.group(2))
+    elif temps:
+        out["T_pirolisis"] = _pick_first_number_in_range(temps, 300, 900)
+
+    # Dosis
+    mD = re.search(r"(\d+(?:\.\d+)?)\s*(?:t/ha|ton/ha|t ha-1|t ha−1)", t, flags=re.IGNORECASE)
+    if mD:
+        out["dosis_efectiva"] = float(mD.group(1))
+
+    # MO
+    mmo = re.search(r"(?:materia\s*organica|organic\s*matter|OM)[^0-9]{0,20}(\d+(?:\.\d+)?)\s*%?", t, flags=re.IGNORECASE)
+    if mmo:
+        out["mo"] = float(mmo.group(1))
+
+    # Feedstock (heurístico)
+    feed_k = ["coco", "cacao", "cafe", "coffee", "coconut", "wood", "madera", "manure", "estiércol", "bamboo", "bambu", "rice", "arroz"]
+    t_low = strip_accents(t).lower()
+    for k in feed_k:
+        if k in t_low:
+            if k in ["coco", "coconut"]:
+                out["Feedstock"] = "Cáscara coco"
+            elif k in ["cafe", "coffee"]:
+                out["Feedstock"] = "Cáscara café"
+            elif k == "cacao":
+                out["Feedstock"] = "Cáscara cacao"
+            elif k in ["wood", "madera"]:
+                out["Feedstock"] = "Madera"
+            elif k in ["manure", "estiércol"]:
+                out["Feedstock"] = "Estiércol"
+            elif k in ["bamboo", "bambu"]:
+                out["Feedstock"] = "Bambú"
+            elif k in ["rice", "arroz"]:
+                out["Feedstock"] = "Cáscara arroz"
+            break
+
+    return out
 
 # =============================================================================
 # EXCEL (OPCIONAL)
@@ -710,6 +933,8 @@ def calcular_secuestro_carbono(feedstock: str, temperatura: float, rendimiento_b
 # ML — ENTRENAMIENTO (robusto por ESQUEMA)
 # =============================================================================
 
+TARGET_COL = "dosis_efectiva"
+
 SCHEMA_NUM_COLS = [
     "ph", "mo", "CIC", "Metales",
     "T_pirolisis", "pH_biochar", "Area_BET",
@@ -718,34 +943,16 @@ SCHEMA_NUM_COLS = [
     "O2_ppm", "O2_temp_exposicion", "H_C_ratio", "O_C_ratio",
 ]
 
-FORCE_CATEGORICAL_COLS = {
-    "Tipo", "Cultivo",
-    "Textura", "Feedstock", "Estado_suelo", "Tamaño_biochar", "Objetivo",
-    "Riego", "Clima", "Sistema_cultivo", "Tipo_producto", "Objetivo_calidad",
-    "Metodo_enfriamiento",
-}
+META_COLS = [
+    "Fuente","Fuente_raw","doi","ref_type","doi_format_ok","doi_url","ref_id","ref_quality",
+    "verification_status","verified_title","verified_journal","verified_year","verified_authors",
+    "verification_notes","Fuente_display","Fuente_status","Fuente_public",
+    "ingest_timestamp","pdf_filename"
+]
 
-def entrenar_modelo_xgb_pipeline(
-    df_raw: pd.DataFrame,
-    target: str = "dosis_efectiva"
-) -> Tuple[Pipeline, float, List[str], pd.DataFrame, int, Optional[int]]:
-    """
-    Retorna:
-    - pipe
-    - r2 holdout
-    - expected_cols
-    - metadata (no features)
-    - train_n (filas usadas con target válido)
-    - train_sources_n (si existe alguna columna de fuente)
-    """
+def entrenar_modelo_xgb_pipeline(df_raw: pd.DataFrame, target: str = TARGET_COL) -> Tuple[Pipeline, float, List[str], pd.DataFrame]:
     if target not in df_raw.columns:
         raise ValueError(f"El dataset debe incluir la columna '{target}'")
-
-    META_COLS = [
-        "Fuente","Fuente_raw","doi","ref_type","doi_format_ok","doi_url","ref_id","ref_quality",
-        "verification_status","verified_title","verified_journal","verified_year","verified_authors",
-        "verification_notes","Fuente_display","Fuente_status","Fuente_public"
-    ]
 
     df_feat, df_meta = split_features_and_metadata(df_raw, metadata_cols=META_COLS)
 
@@ -755,8 +962,7 @@ def entrenar_modelo_xgb_pipeline(
     df_meta = df_meta.loc[keep].copy()
     y = y.loc[keep].copy()
 
-    train_n = int(len(df_feat))
-    if train_n < 10:
+    if len(df_feat) < 10:
         raise ValueError("Dataset insuficiente: se requieren al menos 10 filas con dosis_efectiva válida.")
 
     X = df_feat.drop(columns=[target]).copy()
@@ -765,15 +971,8 @@ def entrenar_modelo_xgb_pipeline(
     num_cols = [c for c in expected_cols if c in SCHEMA_NUM_COLS]
     cat_cols = [c for c in expected_cols if c not in num_cols]
 
-    for c in FORCE_CATEGORICAL_COLS:
-        if c in num_cols:
-            num_cols.remove(c)
-            if c not in cat_cols:
-                cat_cols.append(c)
-
     for c in num_cols:
         X[c] = pd.to_numeric(X[c], errors="coerce")
-
     for c in cat_cols:
         X[c] = X[c].apply(clean_category_value).astype(object)
 
@@ -793,7 +992,7 @@ def entrenar_modelo_xgb_pipeline(
 
     model = xgb.XGBRegressor(
         objective="reg:squarederror",
-        n_estimators=400,
+        n_estimators=450,
         learning_rate=0.05,
         max_depth=6,
         subsample=0.9,
@@ -810,21 +1009,10 @@ def entrenar_modelo_xgb_pipeline(
     pipe.fit(Xtr, ytr)
     r2 = r2_score(yte, pipe.predict(Xte))
 
-    # intenta contar "fuentes" si existe alguna columna típica en metadata
-    train_sources_n = None
-    for cand in ["Fuente_public", "Fuente_display", "Fuente_raw", "Fuente"]:
-        if cand in df_meta.columns:
-            try:
-                train_sources_n = int(pd.Series(df_meta[cand]).dropna().nunique())
-            except Exception:
-                train_sources_n = None
-            break
-
-    return pipe, float(r2), expected_cols, df_meta, train_n, train_sources_n
+    return pipe, float(r2), expected_cols, df_meta
 
 def build_flat_features_for_model(suelo: dict, biochar: dict, cultivo_d: dict, objetivo: str) -> Dict[str, Any]:
     flat: Dict[str, Any] = {}
-
     flat["ph"] = safe_float(suelo.get("pH"), np.nan)
     flat["mo"] = safe_float(suelo.get("MO"), np.nan)
     flat["CIC"] = safe_float(suelo.get("CIC"), np.nan)
@@ -847,7 +1035,6 @@ def build_flat_features_for_model(suelo: dict, biochar: dict, cultivo_d: dict, o
     flat["Objetivo_calidad"] = clean_category_value(cultivo_d.get("Objetivo_calidad"))
     flat["Sensibilidad_salinidad"] = safe_float(cultivo_d.get("Sensibilidad_salinidad"), np.nan)
 
-    # QC features si existen en entrenamiento (no hace daño si el modelo no las usa: quedan como NaN)
     flat["Humedad_total"] = safe_float(biochar.get("Humedad_total"), np.nan)
     flat["Volatiles"] = safe_float(biochar.get("Volatiles"), np.nan)
     flat["Cenizas_biomasa"] = safe_float(biochar.get("Cenizas_biomasa"), np.nan)
@@ -869,8 +1056,34 @@ def preparar_input_modelo(expected_cols: List[str], params_flat: Dict[str, Any])
             row[c] = clean_category_value(params_flat.get(c))
     return pd.DataFrame([row])
 
+def compute_peso_xgb(r2v: float, qc_score: float) -> Tuple[float, str]:
+    r2v = float(r2v)
+    qc_score = float(qc_score)
+
+    xp = np.array([-0.2, 0.0, 0.3, 0.5, 0.7, 0.85, 0.95])
+    fp = np.array([0.10, 0.15, 0.25, 0.40, 0.60, 0.75, 0.80])
+    w = float(np.interp(np.clip(r2v, xp.min(), xp.max()), xp, fp))
+
+    if qc_score < 55:
+        w *= 0.65
+        qc_msg = "QC bajo → damos más peso a la regla (más conservadora)."
+    elif qc_score < 70:
+        w *= 0.85
+        qc_msg = "QC medio → equilibramos regla y ML."
+    else:
+        qc_msg = "QC alto → el ML puede pesar más si su desempeño es bueno."
+
+    w = float(np.clip(w, 0.15, 0.80))
+
+    expl = (
+        f"Peso ML = {w:.2f}. "
+        f"Se calcula con (1) el desempeño del modelo (R²={r2v:.2f}) y (2) la confiabilidad del proceso (QC={qc_score:.0f}/100). "
+        f"{qc_msg}"
+    )
+    return w, expl
+
 # =============================================================================
-# UI — Sidebar: Excel opcional + autoentreno opcional
+# UI — Sidebar: Excel opcional + Google Sheets opcional + autoentreno
 # =============================================================================
 
 st.sidebar.markdown(f"### ⚙️ Configuración ({APP_VERSION})")
@@ -898,17 +1111,83 @@ else:
 
 datos_excel = cargar_datos_excel(excel_path) if excel_path else None
 
-auto_train = st.sidebar.checkbox(
-    "Autoentrenar XGBoost al iniciar (si hay dataset en Excel)",
-    value=False,
-    help="Se activa si el Excel trae hoja 'Dosis_experimental' con 'dosis_efectiva'."
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🗂️ Persistencia (Google Sheets)")
+
+# ✅ Defaults desde Secrets (st.secrets["google_sheets"])
+_secrets_gs = st.secrets.get("google_sheets", {})
+DEFAULT_GS_SHEET_ID = extract_sheet_id(_secrets_gs.get("sheet_id", "")) if isinstance(_secrets_gs, dict) else ""
+DEFAULT_GS_WORKSHEET = (_secrets_gs.get("worksheet", "data") if isinstance(_secrets_gs, dict) else "data")
+DEFAULT_GS_TEST_WS = (_secrets_gs.get("test_worksheet", "healthcheck") if isinstance(_secrets_gs, dict) else "healthcheck")
+
+gs_enabled = st.sidebar.checkbox(
+    "Activar Google Sheets",
+    value=bool(DEFAULT_GS_SHEET_ID),
+    help="Guarda/lee la base desde una hoja para trabajo colaborativo."
 )
+
+gs_sheet_id_in = st.sidebar.text_input(
+    "Sheet ID o URL",
+    value=DEFAULT_GS_SHEET_ID,
+    help="Pega el ID o el link del Google Sheet; la app extrae el ID automáticamente.",
+    disabled=not gs_enabled
+)
+gs_sheet_id = extract_sheet_id(gs_sheet_id_in)
+
+gs_worksheet = st.sidebar.text_input(
+    "Worksheet (dataset)",
+    value=DEFAULT_GS_WORKSHEET,
+    help="Nombre de la pestaña dentro del Sheet.",
+    disabled=not gs_enabled
+)
+gs_test_worksheet = st.sidebar.text_input(
+    "Worksheet (pruebas)",
+    value=DEFAULT_GS_TEST_WS,
+    help="Pestaña usada para test de escritura (se crea si no existe).",
+    disabled=not gs_enabled
+)
+
+auto_train = st.sidebar.checkbox(
+    "Autoentrenar si hay ≥ N nuevas filas validadas",
+    value=False,
+    disabled=not gs_enabled,
+)
+N_AUTO = st.sidebar.number_input("N (umbral autoentreno)", min_value=1, max_value=100, value=10, step=1, disabled=(not gs_enabled))
+
+with st.sidebar.expander("🧪 Probar conexión (lee + escribe)", expanded=False):
+    if not gs_enabled:
+        st.info("Activa Google Sheets para habilitar la prueba.")
+    elif not _GS_AVAILABLE:
+        st.error("Faltan dependencias: `gspread` y `google-auth` en requirements.txt.")
+    elif not gs_sheet_id:
+        st.warning("Ingresa un Sheet ID o URL.")
+    else:
+        if st.button("✅ Probar ahora", use_container_width=True):
+            try:
+                with st.spinner("Probando lectura/escritura..."):
+                    out = gs_test_read_write(gs_sheet_id, gs_worksheet, gs_test_worksheet)
+                st.success("Conexión OK ✅")
+                st.write(f"Dataset ({gs_worksheet}): **{out['data_rows']}** filas, **{out['data_cols']}** columnas.")
+                st.write(f"Escritura en ({out['test_ws']}): última fila:", out["last_test_row"])
+                st.caption("Tip: el test escribe SOLO en el worksheet de pruebas para no ensuciar tu dataset.")
+            except Exception as e:
+                st.error(f"Falló la prueba: {e}")
+                st.caption("Revisa: (1) share del Sheet con la Service Account, (2) APIs habilitadas, (3) Secrets correctos.")
+
+with st.sidebar.expander("Cómo configurar Google Sheets", expanded=False):
+    st.markdown("""
+- En **Secrets** debes tener:
+  - `gcp_service_account` (JSON de la Service Account)
+  - `google_sheets.sheet_id` (ID del Sheet)
+  - `google_sheets.worksheet` (p. ej. `data`)
+- Recuerda: el Sheet debe estar **compartido** con el email de la Service Account como **Editor**.
+    """)
 
 # header
 col1, col2 = st.columns([3, 1])
 with col1:
     st.markdown('<div class="main-header">🧬 Prescriptor Híbrido Biochar</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">QC + reglas determinísticas + XGBoost</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">QC + reglas determinísticas + XGBoost + PDF→Base</div>', unsafe_allow_html=True)
 with col2:
     try:
         st.image("logonanomof.png", width=240)
@@ -929,29 +1208,73 @@ if "expected_cols" not in st.session_state:
     st.session_state.expected_cols = []
 if "train_metadata" not in st.session_state:
     st.session_state.train_metadata = pd.DataFrame()
-if "train_n" not in st.session_state:
-    st.session_state.train_n = 0
-if "train_sources_n" not in st.session_state:
-    st.session_state.train_sources_n = None
 if "parametros_usuario" not in st.session_state:
     st.session_state.parametros_usuario = {}
 if "dataset_cats" not in st.session_state:
     st.session_state.dataset_cats = {}
+if "last_train_confirmed" not in st.session_state:
+    st.session_state.last_train_confirmed = 0
+if "pdf_extract" not in st.session_state:
+    st.session_state.pdf_extract = {}
 
-# Autoentreno opcional
-if auto_train and (not st.session_state.modelo_activo) and datos_excel is not None:
+# =============================================================================
+# Helper: cargar dataset desde Sheets (si está habilitado)
+# =============================================================================
+
+def load_dataset_from_gs() -> pd.DataFrame:
+    if not gs_enabled:
+        return pd.DataFrame()
+    if not gs_sheet_id or not gs_worksheet:
+        return pd.DataFrame()
+    df = gs_read_df(gs_sheet_id, gs_worksheet)
+    if df is None or df.empty:
+        return pd.DataFrame()
+    df = normalize_dataframe_columns(df)
+    capture_dataset_categories(df)
+    return df
+
+def count_confirmed_rows(df: pd.DataFrame) -> int:
+    if df is None or df.empty:
+        return 0
+    if "verification_status" in df.columns:
+        return int((df["verification_status"].astype(str).str.lower() == "user_confirmed").sum())
+    return int(len(df))
+
+# Autoentreno opcional con Google Sheets
+if gs_enabled and auto_train and gs_sheet_id and gs_worksheet:
     try:
-        df0 = datos_excel.get("dosis_exp")
-        if df0 is not None and "dosis_efectiva" in df0.columns and len(df0) >= 10:
-            df0n = normalize_dataframe_columns(df0)
-            capture_dataset_categories(df0n)
-            pipe, r2v, expected_cols, meta, train_n, train_sources_n = entrenar_modelo_xgb_pipeline(df0n, target="dosis_efectiva")
+        df_gs = load_dataset_from_gs()
+        confirmed = count_confirmed_rows(df_gs)
+        delta = confirmed - int(st.session_state.last_train_confirmed)
+        if delta >= int(N_AUTO) and confirmed >= 10 and (TARGET_COL in df_gs.columns):
+            pipe, r2v, expected_cols, meta = entrenar_modelo_xgb_pipeline(df_gs, target=TARGET_COL)
             st.session_state.modelo_pipe = pipe
             st.session_state.r2_score = r2v
             st.session_state.expected_cols = expected_cols
             st.session_state.train_metadata = meta
-            st.session_state.train_n = train_n
-            st.session_state.train_sources_n = train_sources_n
+            st.session_state.modelo_activo = True
+            st.session_state.last_train_confirmed = confirmed
+    except Exception:
+        pass
+
+# Autoentreno opcional desde Excel
+auto_train_excel = st.sidebar.checkbox(
+    "Autoentrenar al iniciar usando Dosis_experimental (Excel)",
+    value=False,
+    help="Usa la hoja Dosis_experimental si está presente y contiene dosis_efectiva."
+)
+
+if auto_train_excel and (not st.session_state.modelo_activo) and datos_excel is not None:
+    try:
+        df0 = datos_excel.get("dosis_exp")
+        if df0 is not None and TARGET_COL in df0.columns and len(df0) >= 10:
+            df0n = normalize_dataframe_columns(df0)
+            capture_dataset_categories(df0n)
+            pipe, r2v, expected_cols, meta = entrenar_modelo_xgb_pipeline(df0n, target=TARGET_COL)
+            st.session_state.modelo_pipe = pipe
+            st.session_state.r2_score = r2v
+            st.session_state.expected_cols = expected_cols
+            st.session_state.train_metadata = meta
             st.session_state.modelo_activo = True
     except Exception:
         pass
@@ -960,11 +1283,12 @@ if auto_train and (not st.session_state.modelo_activo) and datos_excel is not No
 # TABS
 # =============================================================================
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🎯 Prescripción Híbrida",
     "📊 Entrenamiento XGBoost",
     "📚 Base de Conocimiento",
-    "⚗️ Ingeniería / QC"
+    "⚗️ Ingeniería / QC",
+    "📄 PDF → Base (Google Sheets)"
 ])
 
 # =============================================================================
@@ -1144,42 +1468,21 @@ with tab1:
             dosis_xgb = None
             metodo = tipo_det
             peso_xgb = 0.0
+            peso_expl = "Modelo inactivo."
 
             if st.session_state.modelo_activo and st.session_state.modelo_pipe is not None:
                 try:
                     flat = build_flat_features_for_model(suelo, biochar, cultivo_d, objetivo)
                     df_in = preparar_input_modelo(st.session_state.expected_cols, flat)
                     dosis_xgb = float(st.session_state.modelo_pipe.predict(df_in)[0])
+                    peso_xgb, peso_expl = compute_peso_xgb(st.session_state.r2_score, qc.score)
                 except Exception as e:
                     st.warning(f"Predicción XGBoost no disponible: {e}")
                     dosis_xgb = None
 
             if dosis_xgb is not None:
-                # peso dinámico (prudente): depende de desempeño + QC
-                r2v = float(st.session_state.r2_score or 0.0)
-
-                # base: parte de 0.60 pero se ajusta suave
-                peso_xgb = 0.60
-
-                # si el desempeño baja, baja el peso
-                if r2v < 0.5:
-                    peso_xgb = 0.30
-                elif r2v < 0.7:
-                    peso_xgb = 0.45
-                elif r2v > 0.9:
-                    peso_xgb = 0.62  # pequeño premio, no “manda todo”
-
-                # QC penaliza si hay incertidumbre
-                if qc.score < 60:
-                    peso_xgb = min(peso_xgb, 0.35)
-                elif qc.score < 80:
-                    peso_xgb = min(peso_xgb, 0.55)
-
-                # clamp final
-                peso_xgb = float(np.clip(peso_xgb, 0.20, 0.70))
-
                 dosis_final = (1 - peso_xgb) * dosis_det_qc + peso_xgb * dosis_xgb
-                metodo = f"Híbrido (Det+QC + XGBoost | peso_xgb={peso_xgb:.2f})"
+                metodo = f"Híbrido (Regla+QC + XGBoost | peso_ml={peso_xgb:.2f})"
                 mostrar_xgb = True
             else:
                 dosis_final = dosis_det_qc
@@ -1188,17 +1491,6 @@ with tab1:
             dosis_final = float(np.clip(dosis_final, 3, 60))
 
             st.markdown("---")
-
-            # explicación dummy (visible)
-            explain_txt = None
-            if mostrar_xgb:
-                explain_txt = explain_peso_xgb_for_users(
-                    peso_xgb=peso_xgb,
-                    r2_holdout=st.session_state.r2_score,
-                    qc_score=qc.score,
-                    train_n=int(st.session_state.train_n or 0),
-                    train_sources_n=st.session_state.train_sources_n
-                )
 
             if es_flor:
                 st.markdown("### 🌸 **PRESCRIPCIÓN PARA FLORICULTURA**")
@@ -1211,17 +1503,13 @@ with tab1:
                         <p style='color: #666;'>{metodo}</p>
                     </div>
                     """, unsafe_allow_html=True)
-                if explain_txt:
-                    st.info(explain_txt)
             else:
                 st.success(f"### 📊 Dosis Recomendada: **{dosis_final:.1f} t/Ha**")
                 st.caption(metodo)
-                if explain_txt:
-                    st.info(explain_txt)
 
             r1, r2c, r3 = st.columns(3)
             with r1:
-                st.metric("Determinístico", f"{dosis_det:.1f} t/Ha", delta=f"QC×{qc.confidence_factor:.2f} → {dosis_det_qc:.1f}")
+                st.metric("Regla (con QC)", f"{dosis_det_qc:.1f} t/Ha", delta=f"Base {dosis_det:.1f} × QC {qc.confidence_factor:.2f}")
             with r2c:
                 if mostrar_xgb:
                     st.metric("XGBoost", f"{dosis_xgb:.1f} t/Ha", delta=f"R² (holdout): {st.session_state.r2_score:.3f}")
@@ -1230,11 +1518,13 @@ with tab1:
             with r3:
                 st.metric("QC Score", f"{qc.score:.0f}/100", delta=pill_text)
 
-            with st.expander("📋 Detalles y trazabilidad", expanded=True):
+            st.markdown(f"<div class='hint'><b>¿Por qué el peso del ML fue {peso_xgb:.2f}?</b><br>{peso_expl}</div>", unsafe_allow_html=True)
+
+            with st.expander("📋 Detalles y trazabilidad", expanded=False):
                 st.markdown(f"""
 **Suelo:** pH={ph_suelo}, MO={mo_suelo}%, CIC={cic_suelo}, Textura={textura}, Estado={estado_suelo}, Metales={metales}  
 **Biochar:** Feedstock={feedstock}, T={temp_pirolisis}°C, pH={ph_biochar}, Tamaño={tamano_ds}, BET={area_bet}  
-**Cultivo (Tipo):** {cultivo} | Riego={sistema_riego} | Clima={clima} | Objetivo={objetivo}  
+**Cultivo:** {cultivo} | Riego={sistema_riego} | Clima={clima} | Objetivo={objetivo}  
 **QC:** score={qc.score:.0f}, flags={", ".join(qc.flags) if qc.flags else "—"}
                 """)
                 if modo_experto:
@@ -1244,13 +1534,13 @@ with tab1:
 
             out = pd.DataFrame({
                 "Parámetro": [
-                    "Dosis_final_t_ha", "Metodo", "QC_score", "QC_factor", "QC_flags",
+                    "Dosis_final_t_ha", "Metodo", "peso_ml", "R2_holdout", "QC_score", "QC_factor", "QC_flags",
                     "Objetivo", "Cultivo", "Riego", "Clima",
                     "pH_suelo", "MO", "CIC", "Textura", "Estado_suelo", "Metales",
                     "Feedstock", "T_pirolisis", "pH_biochar", "Tamaño_biochar", "BET",
                 ],
                 "Valor": [
-                    f"{dosis_final:.2f}", metodo, f"{qc.score:.0f}", f"{qc.confidence_factor:.2f}", "; ".join(qc.flags),
+                    f"{dosis_final:.2f}", metodo, f"{peso_xgb:.2f}", f"{st.session_state.r2_score:.4f}", f"{qc.score:.0f}", f"{qc.confidence_factor:.2f}", "; ".join(qc.flags),
                     objetivo, cultivo, sistema_riego, clima,
                     ph_suelo, mo_suelo, cic_suelo, textura, estado_suelo, metales,
                     feedstock, temp_pirolisis, ph_biochar, tamano_ds, area_bet,
@@ -1276,83 +1566,110 @@ with tab1:
 with tab2:
     st.header("Entrenamiento del Modelo (XGBoost)")
 
-    uploaded_csv = st.file_uploader("📤 Subir dataset (CSV)", type=["csv"])
+    src = st.radio("Fuente de datos para entrenar", ["Subir CSV", "Google Sheets", "Excel (Dosis_experimental)"], horizontal=True)
 
-    if uploaded_csv is not None:
-        try:
-            df_raw = robust_read_csv_from_upload(uploaded_csv)
-            df_raw = normalize_dataframe_columns(df_raw)
+    if src == "Subir CSV":
+        uploaded_csv = st.file_uploader("📤 Subir dataset (CSV)", type=["csv"], key="train_csv")
+        if uploaded_csv is not None:
+            try:
+                df_raw = robust_read_csv_from_upload(uploaded_csv)
+                df_raw = normalize_dataframe_columns(df_raw)
+                capture_dataset_categories(df_raw)
 
-            capture_dataset_categories(df_raw)
+                st.subheader("Vista previa")
+                st.dataframe(df_raw.head(20), use_container_width=True)
 
-            st.subheader("Vista previa (incluye metadata si existe)")
-            st.dataframe(df_raw.head(20), use_container_width=True)
+                if TARGET_COL not in df_raw.columns:
+                    st.error(f"Falta la columna '{TARGET_COL}'.")
+                else:
+                    st.caption(f"Filas: {len(df_raw)} | Columnas: {len(df_raw.columns)}")
+                    if st.button("🚀 Entrenar XGBoost", type="primary", key="btn_train_csv"):
+                        with st.spinner("Entrenando..."):
+                            pipe, r2v, expected_cols, meta = entrenar_modelo_xgb_pipeline(df_raw, target=TARGET_COL)
 
-            if "dosis_efectiva" not in df_raw.columns:
-                st.error("Falta la columna 'dosis_efectiva'.")
-            else:
-                st.caption(f"Filas: {len(df_raw)} | Columnas: {len(df_raw.columns)}")
+                            st.session_state.modelo_pipe = pipe
+                            st.session_state.r2_score = r2v
+                            st.session_state.expected_cols = expected_cols
+                            st.session_state.train_metadata = meta
+                            st.session_state.modelo_activo = True
 
-                if st.button("🚀 Entrenar XGBoost", type="primary"):
-                    with st.spinner("Entrenando..."):
-                        pipe, r2v, expected_cols, meta, train_n, train_sources_n = entrenar_modelo_xgb_pipeline(df_raw, target="dosis_efectiva")
+                        st.success("Modelo entrenado y activado ✅")
+                        st.metric("R² (holdout)", f"{r2v:.4f}")
 
-                        st.session_state.modelo_pipe = pipe
-                        st.session_state.r2_score = r2v
-                        st.session_state.expected_cols = expected_cols
-                        st.session_state.train_metadata = meta
-                        st.session_state.train_n = train_n
-                        st.session_state.train_sources_n = train_sources_n
-                        st.session_state.modelo_activo = True
+            except Exception as e:
+                st.error(f"Error entrenando: {e}")
 
-                    st.success("Modelo entrenado y activado ✅")
-                    st.metric("R² (holdout)", f"{r2v:.4f}")
-                    st.caption(f"Filas usadas (con dosis_efectiva válida): {train_n}")
-                    if train_sources_n is not None:
-                        st.caption(f"Fuentes distintas (según metadata): {train_sources_n}")
-                    st.caption(f"Columnas usadas por el modelo: {len(expected_cols)}")
+    elif src == "Google Sheets":
+        if not gs_enabled:
+            st.info("Activa Google Sheets en el panel izquierdo para usar esta opción.")
+        elif not _GS_AVAILABLE:
+            st.error("Faltan dependencias: agrega `gspread` y `google-auth` a requirements.txt.")
+        elif not gs_sheet_id or not gs_worksheet:
+            st.warning("Completa Sheet ID y Worksheet en el panel izquierdo (o en Secrets).")
+        else:
+            if st.button("🔄 Cargar/Refrescar dataset de Google Sheets", key="btn_load_gs"):
+                st.cache_data.clear()
+            try:
+                df_gs = load_dataset_from_gs()
+                if df_gs.empty:
+                    st.warning("La hoja está vacía o no se pudo leer.")
+                else:
+                    st.subheader("Vista previa (Google Sheets)")
+                    st.dataframe(df_gs.head(20), use_container_width=True)
+                    st.caption(f"Filas: {len(df_gs)} | Columnas: {len(df_gs.columns)}")
+                    if TARGET_COL not in df_gs.columns:
+                        st.error(f"Falta la columna '{TARGET_COL}' en el Sheet.")
+                    else:
+                        confirmed = count_confirmed_rows(df_gs)
+                        st.info(f"Filas validadas (verification_status='user_confirmed'): {confirmed}")
+                        if st.button("🚀 Entrenar ahora (Google Sheets)", type="primary", key="btn_train_gs"):
+                            with st.spinner("Entrenando..."):
+                                pipe, r2v, expected_cols, meta = entrenar_modelo_xgb_pipeline(df_gs, target=TARGET_COL)
+                                st.session_state.modelo_pipe = pipe
+                                st.session_state.r2_score = r2v
+                                st.session_state.expected_cols = expected_cols
+                                st.session_state.train_metadata = meta
+                                st.session_state.modelo_activo = True
+                                st.session_state.last_train_confirmed = confirmed
 
-                    if len(meta.columns) > 0:
-                        st.info("Metadata preservada (no usada como feature): " + ", ".join(list(meta.columns)))
+                            st.success("Modelo entrenado con Google Sheets ✅")
+                            st.metric("R² (holdout)", f"{r2v:.4f}")
 
                     with st.expander("📌 Categorías capturadas del dataset (para alinear UI)", expanded=False):
                         cats = st.session_state.get("dataset_cats", {})
                         for k, v in cats.items():
                             st.write(f"**{k}** ({len(v)}):", v[:50] + (["…"] if len(v) > 50 else []))
 
-        except Exception as e:
-            st.error(f"Error entrenando: {e}")
+            except Exception as e:
+                st.error(f"No se pudo leer/entrenar con Google Sheets: {e}")
 
-    st.markdown("---")
-    st.subheader("Entrenar con dataset del Excel (opcional)")
-    if datos_excel is None:
-        st.info("No hay Excel cargado (puedes cargarlo en el panel izquierdo).")
     else:
-        df_excel = datos_excel.get("dosis_exp")
-        if df_excel is None or df_excel.empty:
-            st.warning("El Excel no trae 'Dosis_experimental' o está vacío.")
+        if datos_excel is None:
+            st.info("No hay Excel cargado (puedes cargarlo en el panel izquierdo).")
         else:
-            st.caption(f"Filas en Dosis_experimental: {len(df_excel)}")
-            if st.button("🔄 Entrenar con Dosis_experimental del Excel"):
-                try:
-                    with st.spinner("Entrenando..."):
-                        df_excel_n = normalize_dataframe_columns(df_excel)
-                        capture_dataset_categories(df_excel_n)
-                        pipe, r2v, expected_cols, meta, train_n, train_sources_n = entrenar_modelo_xgb_pipeline(df_excel_n, target="dosis_efectiva")
+            df_excel = datos_excel.get("dosis_exp")
+            if df_excel is None or df_excel.empty:
+                st.warning("El Excel no trae 'Dosis_experimental' o está vacío.")
+            else:
+                df_excel_n = normalize_dataframe_columns(df_excel)
+                capture_dataset_categories(df_excel_n)
+                st.caption(f"Filas en Dosis_experimental: {len(df_excel_n)}")
+                st.dataframe(df_excel_n.head(15), use_container_width=True)
+                if st.button("🚀 Entrenar ahora (Excel)", type="primary", key="btn_train_excel"):
+                    try:
+                        with st.spinner("Entrenando..."):
+                            pipe, r2v, expected_cols, meta = entrenar_modelo_xgb_pipeline(df_excel_n, target=TARGET_COL)
 
-                        st.session_state.modelo_pipe = pipe
-                        st.session_state.r2_score = r2v
-                        st.session_state.expected_cols = expected_cols
-                        st.session_state.train_metadata = meta
-                        st.session_state.train_n = train_n
-                        st.session_state.train_sources_n = train_sources_n
-                        st.session_state.modelo_activo = True
+                            st.session_state.modelo_pipe = pipe
+                            st.session_state.r2_score = r2v
+                            st.session_state.expected_cols = expected_cols
+                            st.session_state.train_metadata = meta
+                            st.session_state.modelo_activo = True
 
-                    st.success("Modelo entrenado con Excel ✅")
-                    st.metric("R² (holdout)", f"{r2v:.4f}")
-                    st.caption(f"Filas usadas (con dosis_efectiva válida): {train_n}")
-                except Exception as e:
-                    st.error(f"No se pudo entrenar con el Excel: {e}")
+                        st.success("Modelo entrenado con Excel ✅")
+                        st.metric("R² (holdout)", f"{r2v:.4f}")
+                    except Exception as e:
+                        st.error(f"No se pudo entrenar con el Excel: {e}")
 
 # =============================================================================
 # TAB 3 — Base de Conocimiento
@@ -1432,6 +1749,130 @@ with tab4:
                 "Porcentaje": [bal["rend_biochar_pct"], bal["rend_biooil_pct"], bal["rend_gas_pct"]],
             })
             st.bar_chart(df_plot.set_index("Producto"))
+
+# =============================================================================
+# TAB 5 — PDF → Base (Google Sheets)
+# =============================================================================
+
+with tab5:
+    st.header("📄 Ingesta de Artículos (PDF) → Base persistente")
+
+    st.markdown("""
+Este módulo está pensado para **mejorar la base de datos de manera controlada**:
+1) Subes un PDF.
+2) El sistema **intenta** extraer campos (heurístico).
+3) Tú **confirmas/editar** antes de guardar.
+4) Guardamos como fila en Google Sheets (con `verification_status`).
+5) Entrenas cuando quieras, o activas autoentreno cuando haya ≥ N filas validadas.
+    """)
+
+    if not gs_enabled:
+        st.info("Activa Google Sheets en el panel izquierdo para habilitar guardado persistente.")
+    elif not _GS_AVAILABLE:
+        st.error("Faltan dependencias: agrega `gspread` y `google-auth` a requirements.txt.")
+    elif not gs_sheet_id or not gs_worksheet:
+        st.warning("Completa Sheet ID y Worksheet en el panel izquierdo (o en Secrets).")
+    else:
+        pdf_file = st.file_uploader("Sube PDF del artículo", type=["pdf"], key="pdf_upl")
+        doi_manual = st.text_input("DOI (opcional)", value="", help="Si el PDF no lo trae claro, escribe el DOI aquí.")
+
+        colA, colB = st.columns([1, 1])
+        with colA:
+            extract_btn = st.button("🔎 Extraer campos (heurístico)", type="primary", disabled=(pdf_file is None))
+        with colB:
+            clear_btn = st.button("🧹 Limpiar extracción")
+
+        if clear_btn:
+            st.session_state.pdf_extract = {}
+
+        if extract_btn and pdf_file is not None:
+            try:
+                with st.spinner("Leyendo PDF y extrayendo..."):
+                    txt = extract_text_from_pdf(pdf_file, max_pages=6)
+                    fields = infer_fields_from_text(txt)
+                    if doi_manual.strip():
+                        fields["doi"] = doi_manual.strip()
+                    fields["pdf_filename"] = pdf_file.name
+                    fields["ingest_timestamp"] = now_iso()
+                    st.session_state.pdf_extract = fields
+                st.success("Extracción realizada. Revisa y ajusta antes de guardar.")
+            except Exception as e:
+                st.error(f"No se pudo extraer del PDF: {e}")
+
+        fields = st.session_state.get("pdf_extract", {}) or {}
+        if fields:
+            st.subheader("✅ Confirmación (antes de guardar)")
+            st.caption("Tip: si no conoces dosis o falta un dato clave, guarda como 'Borrador' para no entrenar aún.")
+
+            ph_s = safe_float(fields.get("ph"), np.nan)
+            mo_s = safe_float(fields.get("mo"), np.nan)
+            t_p = safe_float(fields.get("T_pirolisis"), np.nan)
+            ph_b = safe_float(fields.get("pH_biochar"), np.nan)
+            bet = safe_float(fields.get("Area_BET"), np.nan)
+            dosis = safe_float(fields.get("dosis_efectiva"), np.nan)
+            feed = fields.get("Feedstock", np.nan)
+
+            fcol1, fcol2, fcol3 = st.columns(3)
+            with fcol1:
+                doi = st.text_input("doi", value=str(fields.get("doi","") or ""))
+                fuente = st.text_area("Fuente (texto corto)", value=str(fields.get("Fuente","") or ""), height=80)
+                verification_notes = st.text_area("Notas de verificación", value=str(fields.get("verification_notes","") or ""), height=80)
+
+            with fcol2:
+                feedstock_v = st.selectbox("Feedstock", ui_options("Feedstock", DEFAULT_FEEDSTOCKS), index=0)
+                ph_soil_v = st.number_input("ph (suelo)", value=float(ph_s) if np.isfinite(ph_s) else 6.5, min_value=3.0, max_value=9.5, step=0.1)
+                mo_v = st.number_input("mo (Materia orgánica %)", value=float(mo_s) if np.isfinite(mo_s) else 2.0, min_value=0.0, max_value=20.0, step=0.1)
+                textura_v = st.selectbox("Textura", ui_options("Textura", DEFAULT_TEXTURAS), index=0)
+
+            with fcol3:
+                T_v = st.number_input("T_pirolisis (°C)", value=float(t_p) if np.isfinite(t_p) else 550.0, min_value=250.0, max_value=950.0, step=10.0)
+                ph_bio_v = st.number_input("pH_biochar", value=float(ph_b) if np.isfinite(ph_b) else 9.0, min_value=3.0, max_value=14.0, step=0.1)
+                bet_v = st.number_input("Area_BET (m²/g)", value=float(bet) if np.isfinite(bet) else 300.0, min_value=0.0, max_value=2000.0, step=10.0)
+                dosis_v = st.number_input("dosis_efectiva (t/ha)", value=float(dosis) if np.isfinite(dosis) else 0.0, min_value=0.0, max_value=200.0, step=0.1)
+
+            objetivo_v = st.selectbox("Objetivo", ui_options("Objetivo", DEFAULT_OBJETIVOS), index=0)
+            tamano_v = st.selectbox("Tamaño_biochar", ui_options("Tamaño_biochar", DEFAULT_TAMANOS), index=0)
+
+            save_as_confirmed = st.checkbox("Guardar como VALIDADO (entra a entrenamiento)", value=(dosis_v > 0))
+            verification_status = "user_confirmed" if save_as_confirmed else "draft"
+
+            if not save_as_confirmed and dosis_v > 0:
+                st.info("Puedes marcarlo como validado si confirmas que esa dosis viene efectivamente del artículo.")
+
+            row = {
+                "ph": ph_soil_v,
+                "mo": mo_v,
+                "Textura": textura_v,
+                "Feedstock": feedstock_v,
+                "T_pirolisis": T_v,
+                "pH_biochar": ph_bio_v,
+                "Area_BET": bet_v,
+                "Tamaño_biochar": tamano_v,
+                "Objetivo": objetivo_v,
+                "dosis_efectiva": dosis_v if dosis_v > 0 else "",
+                "Fuente": fuente,
+                "doi": doi,
+                "verification_status": verification_status,
+                "verification_notes": verification_notes,
+                "ingest_timestamp": fields.get("ingest_timestamp", now_iso()),
+                "pdf_filename": fields.get("pdf_filename", ""),
+            }
+
+            required_headers = unique_sorted(
+                list(row.keys()) +
+                META_COLS +
+                ["ph","mo","Textura","Feedstock","T_pirolisis","pH_biochar","Area_BET","Tamaño_biochar","Objetivo","dosis_efectiva"]
+            )
+
+            st.markdown("---")
+            if st.button("💾 Guardar fila en Google Sheets", type="primary"):
+                try:
+                    gs_append_row(gs_sheet_id, gs_worksheet, row, required_headers=required_headers)
+                    st.success("Fila guardada ✅")
+                    st.cache_data.clear()
+                    st.caption("Tip: ve a 'Entrenamiento XGBoost' para entrenar ahora, o activa el autoentreno en el panel izquierdo.")
+                except Exception as e:
+                    st.error(f"No se pudo guardar en Sheets: {e}")
 
 # =============================================================================
 # FOOTER
