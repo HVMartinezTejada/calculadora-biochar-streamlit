@@ -25,7 +25,7 @@ warnings.filterwarnings("ignore")
 # CONFIG
 # =============================================================================
 
-APP_VERSION = "v3.4 (QC + XGBoost robusto + PDF→Google Sheets + Secrets auto + test RW)"
+APP_VERSION = "v3.4.1 (QC + XGBoost robusto + PDF→Sheets blindado + keys + clamp rangos)"
 DEFAULT_EXCEL_PATH = "Biochar_Prescriptor_Sistema_Completo_v1.0.xlsx"
 
 st.set_page_config(page_title="Prescriptor Híbrido Biochar", layout="wide", page_icon="🌱")
@@ -102,6 +102,17 @@ def safe_float(x, default=np.nan) -> float:
         return float(s)
     except Exception:
         return default
+
+def clamp_float_in_range(x: Any, lo: float, hi: float, default: float) -> float:
+    """Devuelve un float dentro de [lo, hi].
+
+    Útil para blindar `st.number_input` cuando el extractor PDF devuelve valores fuera de rango
+    (evita `StreamlitValueBelowMinError` / `StreamlitValueAboveMaxError`).
+    """
+    v = safe_float(x, default=np.nan)
+    if not np.isfinite(v):
+        v = safe_float(default, default=lo)
+    return float(np.clip(v, lo, hi))
 
 def norm_tamano(label: str) -> str:
     s = (label or "").strip().lower()
@@ -1086,7 +1097,7 @@ def compute_peso_xgb(r2v: float, qc_score: float) -> Tuple[float, str]:
 # UI — Sidebar: Excel opcional + Google Sheets opcional + autoentreno
 # =============================================================================
 
-st.sidebar.markdown(f"### ⚙️ Configuración ({APP_VERSION})")
+st.sidebar.markdown(f"###⚙️ Configuración ({APP_VERSION})")
 
 excel_choice = st.sidebar.radio(
     "Base Excel (opcional)",
@@ -1898,7 +1909,7 @@ Este módulo está pensado para **mejorar la base de datos de manera controlada*
 
                 ph_soil_v = st.number_input(
                     "ph (suelo)",
-                    value=float(ph_s) if np.isfinite(ph_s) else 6.5,
+                    value=clamp_float_in_range(ph_s, 3.0, 9.5, 6.5),
                     min_value=3.0,
                     max_value=9.5,
                     step=0.1,
@@ -1906,7 +1917,7 @@ Este módulo está pensado para **mejorar la base de datos de manera controlada*
                 )
                 mo_v = st.number_input(
                     "mo (Materia orgánica %)",
-                    value=float(mo_s) if np.isfinite(mo_s) else 2.0,
+                    value=clamp_float_in_range(mo_s, 0.0, 20.0, 2.0),
                     min_value=0.0,
                     max_value=20.0,
                     step=0.1,
@@ -1924,7 +1935,7 @@ Este módulo está pensado para **mejorar la base de datos de manera controlada*
             with fcol3:
                 T_v = st.number_input(
                     "T_pirolisis (°C)",
-                    value=float(t_p) if np.isfinite(t_p) else 550.0,
+                    value=clamp_float_in_range(t_p, 250.0, 950.0, 550.0),
                     min_value=250.0,
                     max_value=950.0,
                     step=10.0,
@@ -1932,7 +1943,7 @@ Este módulo está pensado para **mejorar la base de datos de manera controlada*
                 )
                 ph_bio_v = st.number_input(
                     "pH_biochar",
-                    value=float(ph_b) if np.isfinite(ph_b) else 9.0,
+                    value=clamp_float_in_range(ph_b, 3.0, 14.0, 9.0),
                     min_value=3.0,
                     max_value=14.0,
                     step=0.1,
@@ -1940,7 +1951,7 @@ Este módulo está pensado para **mejorar la base de datos de manera controlada*
                 )
                 bet_v = st.number_input(
                     "Area_BET (m²/g)",
-                    value=float(bet) if np.isfinite(bet) else 300.0,
+                    value=clamp_float_in_range(bet, 0.0, 2000.0, 300.0),
                     min_value=0.0,
                     max_value=2000.0,
                     step=10.0,
@@ -1948,7 +1959,7 @@ Este módulo está pensado para **mejorar la base de datos de manera controlada*
                 )
                 dosis_v = st.number_input(
                     "dosis_efectiva (t/ha)",
-                    value=float(dosis) if np.isfinite(dosis) else 0.0,
+                    value=clamp_float_in_range(dosis, 0.0, 200.0, 0.0),
                     min_value=0.0,
                     max_value=200.0,
                     step=0.1,
@@ -2030,4 +2041,5 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
 
