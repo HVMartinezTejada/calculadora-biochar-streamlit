@@ -1,4 +1,4 @@
-# VERSIÓN ENERO 02 2026 4:55PM
+# VERSIÓN ENERO 02 2026 4:55PM  (con correcciones 1–4 aplicadas)
 import os
 import io
 import re
@@ -103,6 +103,22 @@ def safe_float(x, default=np.nan) -> float:
         return float(s)
     except Exception:
         return default
+
+# -------------------------------------------------------------------------
+# (1) HELPER CLAMP (evita StreamlitValueBelowMinError / AboveMaxError)
+# -------------------------------------------------------------------------
+def clamp_float(x: Any, min_value: float, max_value: float, default: Optional[float] = None) -> float:
+    v = safe_float(x, default=np.nan)
+    if not np.isfinite(v):
+        v = default if default is not None else min_value
+    return float(np.clip(float(v), float(min_value), float(max_value)))
+
+def clamp_int(x: Any, min_value: int, max_value: int, default: Optional[int] = None) -> int:
+    v = safe_float(x, default=np.nan)
+    if not np.isfinite(v):
+        v = default if default is not None else min_value
+    v = int(round(float(v)))
+    return int(np.clip(v, int(min_value), int(max_value)))
 
 def norm_tamano(label: str) -> str:
     s = (label or "").strip().lower()
@@ -457,6 +473,7 @@ except Exception:
     _PYPDF2_OK = False
 
 _DOI_RE = re.compile(r"(10\.\d{4,9}/[-._;()/:A-Z0-9]+)", re.IGNORECASE)
+_DOI_FULL_RE = re.compile(r"^10\.\d{4,9}/[-._;()/:A-Z0-9]+$", re.IGNORECASE)
 
 def extract_text_from_pdf(uploaded_pdf, max_pages: int = 6) -> str:
     raw = uploaded_pdf.getvalue()
@@ -486,75 +503,165 @@ def _pick_first_number_in_range(nums: List[float], lo: float, hi: float) -> Opti
             return float(n)
     return None
 
+# -------------------------------------------------------------------------
+# (2) REEMPLAZO COMPLETO: infer_fields_from_text(...)
+#     - pH context-aware (suelo vs biochar)
+#     - cassava/yuca
+#     - tipo_artículo (ref_type)
+#     - proximal opcional (humedad/volátiles/cenizas/FC + ratios H/C y O/C si aparecen)
+# -------------------------------------------------------------------------
 def infer_fields_from_text(text: str) -> Dict[str, Any]:
     """
     Heurísticas conservadoras. Se espera que el usuario confirme/edite.
+    Salida: keys canónicas usadas por el sistema (ph, mo, T_pirolisis, pH_biochar, Area_BET, dosis_efectiva, etc.)
+    + metadata: doi, ref_type, (y opcionalmente) proximate, H/C, O/C.
     """
     out: Dict[str, Any] = {}
+    text = text or ""
 
-    # DOI
-    m = _DOI_RE.search(text or "")
+    # DOI (primer match)
+    m = _DOI_RE.search(text)
     if m:
-        out["doi"] = m.group(1).strip()
+        doi = m.group(1).strip().rstrip(").,;")
+        out["doi"] = doi
 
-    # Normaliza texto para buscar números
-    t = (text or "").replace(",", ".")
-    # Captura números sueltos
-    all_nums = [float(x) for x in re.findall(r"(?<!\d)(\d{1,4}(?:\.\d+)?)", t)]
-    # Temperaturas probables (°C)
-    temps = [float(x) for x in re.findall(r"(\d{3,4})\s*°?\s*C", t, flags=re.IGNORECASE)]
+    t_norm = strip_accents(text).lower()
+    t_num = text.replace(",", ".")
+
+    # Tipo de artículo (ref_type)
+    ref_type = "experimental"
+    if any(k in t_norm for k in ["systematic review", "review article", "literature review", "revision bibliografica", "revisión bibliográfica"]):
+        ref_type = "review"
+    if any(k in t_norm for k in ["meta-analysis", "metaanalysis", "meta analysis", "metaanálisis", "meta-analisis", "meta análisis"]):
+        ref_type = "meta_analysis"
+    if any(k in t_norm for k in ["case study", "caso de estudio"]):
+        ref_type = "case_study"
+    out["ref_type"] = ref_type
+
     # BET
-    m_bet = re.search(r"\bBET\b[^0-9]{0,25}(\d{1,4}(?:\.\d+)?)\s*(?:m2/g|m²/g|m\^2/g)", t, flags=re.IGNORECASE)
+    m_bet = re.search(r"\bBET\b[^0-9]{0,40}(\d{1,5}(?:\.\d+)?)\s*(?:m2/g|m²/g|m\^2/g)", t_num, flags=re.IGNORECASE)
     if m_bet:
-        out["Area_BET"] = float(m_bet.group(1))
-    # pH: intenta biochar vs suelo por contexto
-    ph_matches = list(re.finditer(r"\bpH\b[^0-9]{0,10}(\d(?:\.\d+)?)", t, flags=re.IGNORECASE))
+        out["Area_BET"] = safe_float(m_bet.group(1), default=np.nan)
+
+    # pH context-aware: clasificamos por ventana de contexto
+    ph_matches = list(re.finditer(r"\bpH\b[^0-9]{0,12}(\d(?:\.\d+)?)", t_num, flags=re.IGNORECASE))
     for mm in ph_matches:
-        val = float(mm.group(1))
-        window = t[max(0, mm.start()-30): mm.end()+30].lower()
-        if "biochar" in window or "char" in window:
-            if "pH_biochar" not in out:
-                out["pH_biochar"] = val
-        else:
-            if "ph" not in out:
-                out["ph"] = val
+        val = safe_float(mm.group(1), default=np.nan)
+        if not np.isfinite(val):
+            continue
 
-    # Temperatura de pirólisis
-    mT = re.search(r"(pyrolys|pirol)[^0-9]{0,40}(\d{3,4})\s*°?\s*C", t, flags=re.IGNORECASE)
+        win = strip_accents(t_num[max(0, mm.start() - 60): mm.end() + 60]).lower()
+
+        bio_ctx = any(k in win for k in [
+            "biochar", "char", "bc", "pyrol", "pirol", "carboniz", "hydrochar", "htc"
+        ])
+        soil_ctx = any(k in win for k in [
+            "soil", "suelo", "substrat", "sustrat", "field", "campo", "pot", "maceta"
+        ])
+
+        if bio_ctx and ("pH_biochar" not in out):
+            out["pH_biochar"] = float(val)
+            continue
+
+        if (soil_ctx or not bio_ctx) and ("ph" not in out):
+            out["ph"] = float(val)
+            continue
+
+        # fallback si ambos ya están o no quedó claro:
+        if "ph" not in out:
+            out["ph"] = float(val)
+        elif "pH_biochar" not in out:
+            out["pH_biochar"] = float(val)
+
+    # Temperaturas probables (°C)
+    temps = [safe_float(x, np.nan) for x in re.findall(r"(\d{3,4})\s*°?\s*C", t_num, flags=re.IGNORECASE)]
+    temps = [float(x) for x in temps if np.isfinite(x)]
+
+    # Temperatura de pirólisis (contexto pyro/pirol)
+    mT = re.search(r"(?:pyrolys(?:is|ed)?|pirol(?:isis|isis|izado)|carboniz|torref)[^0-9]{0,80}(\d{3,4})\s*°?\s*C",
+                   t_num, flags=re.IGNORECASE)
     if mT:
-        out["T_pirolisis"] = float(mT.group(2))
-    elif temps:
-        out["T_pirolisis"] = _pick_first_number_in_range(temps, 300, 900)
+        out["T_pirolisis"] = safe_float(mT.group(1), default=np.nan)
+    else:
+        # HTT (Hydrothermal / HTC)
+        mHTT = re.search(r"\bHTT\b[^0-9]{0,30}(\d{2,4}(?:\.\d+)?)\s*°?\s*C", t_num, flags=re.IGNORECASE)
+        if mHTT:
+            out["T_pirolisis"] = safe_float(mHTT.group(1), default=np.nan)
+        else:
+            out["T_pirolisis"] = _pick_first_number_in_range(temps, 300, 900)
 
-    # Dosis
-    mD = re.search(r"(\d+(?:\.\d+)?)\s*(?:t/ha|ton/ha|t ha-1|t ha−1)", t, flags=re.IGNORECASE)
+    # Dosis (t/ha o Mg/ha -> equivalente)
+    mD = re.search(r"(\d+(?:\.\d+)?)\s*(?:t\s*/\s*ha|ton\s*/\s*ha|t\s*ha-1|t\s*ha−1|t\s*ha\^-1|t\s*ha\s*-1)",
+                   t_num, flags=re.IGNORECASE)
+    if not mD:
+        mD = re.search(r"(\d+(?:\.\d+)?)\s*(?:mg\s*/\s*ha|mg\s*ha-1|mg\s*ha−1)",
+                       t_num, flags=re.IGNORECASE)
     if mD:
-        out["dosis_efectiva"] = float(mD.group(1))
+        out["dosis_efectiva"] = safe_float(mD.group(1), default=np.nan)
 
-    # MO
-    mmo = re.search(r"(?:materia\s*organica|organic\s*matter|OM)[^0-9]{0,20}(\d+(?:\.\d+)?)\s*%?", t, flags=re.IGNORECASE)
+    # Materia orgánica (MO / OM)
+    mmo = re.search(r"(?:materia\s*organica|materia\s*orgánica|organic\s*matter|\bOM\b)[^0-9]{0,25}(\d+(?:\.\d+)?)\s*%?",
+                    t_num, flags=re.IGNORECASE)
     if mmo:
-        out["mo"] = float(mmo.group(1))
+        out["mo"] = safe_float(mmo.group(1), default=np.nan)
 
-    # Feedstock (heurístico)
-    feed_k = ["coco", "cacao", "cafe", "coffee", "coconut", "wood", "madera", "manure", "estiércol", "bamboo", "bambu", "rice", "arroz"]
-    t_low = strip_accents(t).lower()
-    for k in feed_k:
-        if k in t_low:
-            if k in ["coco", "coconut"]:
-                out["Feedstock"] = "Cáscara coco"
-            elif k in ["cafe", "coffee"]:
-                out["Feedstock"] = "Cáscara café"
-            elif k == "cacao":
-                out["Feedstock"] = "Cáscara cacao"
-            elif k in ["wood", "madera"]:
-                out["Feedstock"] = "Madera"
-            elif k in ["manure", "estiércol"]:
-                out["Feedstock"] = "Estiércol"
-            elif k in ["bamboo", "bambu"]:
-                out["Feedstock"] = "Bambú"
-            elif k in ["rice", "arroz"]:
-                out["Feedstock"] = "Cáscara arroz"
+    # Proximate analysis (opcionales)
+    def _grab_pct(patterns: List[str]) -> Optional[float]:
+        for pat in patterns:
+            mm = re.search(pat, t_num, flags=re.IGNORECASE)
+            if mm:
+                v = safe_float(mm.group(1), default=np.nan)
+                if np.isfinite(v) and 0 <= v <= 100:
+                    return float(v)
+        return None
+
+    hum = _grab_pct([
+        r"(?:moisture|humidity|humedad)[^0-9]{0,25}(\d{1,3}(?:\.\d+)?)\s*%?",
+        r"\bMC\b[^0-9]{0,15}(\d{1,3}(?:\.\d+)?)\s*%?",
+    ])
+    vol = _grab_pct([
+        r"(?:volatile\s*matter|volatiles|volátiles)[^0-9]{0,25}(\d{1,3}(?:\.\d+)?)\s*%?",
+        r"\bVM\b[^0-9]{0,15}(\d{1,3}(?:\.\d+)?)\s*%?",
+    ])
+    ash = _grab_pct([
+        r"(?:ash|ceniz(?:a|as))[^\d]{0,25}(\d{1,3}(?:\.\d+)?)\s*%?",
+    ])
+    fc = _grab_pct([
+        r"(?:fixed\s*carbon|carbono\s*fijo)[^0-9]{0,25}(\d{1,3}(?:\.\d+)?)\s*%?",
+        r"\bFC\b[^0-9]{0,15}(\d{1,3}(?:\.\d+)?)\s*%?",
+    ])
+
+    if hum is not None:
+        out["Humedad_total"] = hum
+    if vol is not None:
+        out["Volatiles"] = vol
+    if ash is not None:
+        out["Cenizas_biomasa"] = ash
+    if fc is not None:
+        out["Carbono_fijo"] = fc
+
+    # Ratios H/C y O/C (si aparecen)
+    m_hc = re.search(r"\bH\s*/\s*C\b[^0-9]{0,15}(\d(?:\.\d+)?)", t_num, flags=re.IGNORECASE)
+    if m_hc:
+        out["H_C_ratio"] = safe_float(m_hc.group(1), default=np.nan)
+    m_oc = re.search(r"\bO\s*/\s*C\b[^0-9]{0,15}(\d(?:\.\d+)?)", t_num, flags=re.IGNORECASE)
+    if m_oc:
+        out["O_C_ratio"] = safe_float(m_oc.group(1), default=np.nan)
+
+    # Feedstock (heurístico, incluye cassava/yuca)
+    feed_map = [
+        (["coconut", "coco"], "Cáscara coco"),
+        (["cacao", "cocoa"], "Cáscara cacao"),
+        (["coffee", "cafe", "café"], "Cáscara café"),
+        (["wood", "madera"], "Madera"),
+        (["manure", "estiércol", "estiercol"], "Estiércol"),
+        (["bamboo", "bambu", "bambú"], "Bambú"),
+        (["rice", "arroz"], "Cáscara arroz"),
+        (["cassava", "yuca"], "Yuca (Cassava)"),
+    ]
+    for keys, label in feed_map:
+        if any(k in t_norm for k in keys):
+            out["Feedstock"] = label
             break
 
     return out
@@ -951,11 +1058,31 @@ META_COLS = [
     "ingest_timestamp","pdf_filename"
 ]
 
+# -------------------------------------------------------------------------
+# (3) AJUSTE ENTRENAMIENTO:
+#     - filtra SOLO verification_status == user_confirmed (si existe)
+#     - excluye ref_quality == inferred (si existe)
+# -------------------------------------------------------------------------
 def entrenar_modelo_xgb_pipeline(df_raw: pd.DataFrame, target: str = TARGET_COL) -> Tuple[Pipeline, float, List[str], pd.DataFrame]:
     if target not in df_raw.columns:
         raise ValueError(f"El dataset debe incluir la columna '{target}'")
 
-    df_feat, df_meta = split_features_and_metadata(df_raw, metadata_cols=META_COLS)
+    df = df_raw.copy()
+
+    # Solo filas user_confirmed (si existe la columna)
+    if "verification_status" in df.columns:
+        vs = df["verification_status"].astype(str).str.strip().str.lower()
+        df = df[vs == "user_confirmed"].copy()
+
+    # Excluir inferred (si existe ref_quality o Fuente_status)
+    if "ref_quality" in df.columns:
+        rq = df["ref_quality"].astype(str).str.strip().str.lower()
+        df = df[rq != "inferred"].copy()
+    if "Fuente_status" in df.columns:
+        fs = df["Fuente_status"].astype(str).str.strip().str.lower()
+        df = df[fs != "inferred"].copy()
+
+    df_feat, df_meta = split_features_and_metadata(df, metadata_cols=META_COLS)
 
     y = pd.to_numeric(df_feat[target], errors="coerce")
     keep = y.notna()
@@ -964,7 +1091,7 @@ def entrenar_modelo_xgb_pipeline(df_raw: pd.DataFrame, target: str = TARGET_COL)
     y = y.loc[keep].copy()
 
     if len(df_feat) < 10:
-        raise ValueError("Dataset insuficiente: se requieren al menos 10 filas con dosis_efectiva válida.")
+        raise ValueError("Dataset insuficiente (post-filtros): se requieren al menos 10 filas VALIDADAS con dosis_efectiva válida.")
 
     X = df_feat.drop(columns=[target]).copy()
     expected_cols = list(X.columns)
@@ -1754,22 +1881,26 @@ with tab4:
 # =============================================================================
 # TAB 5 — PDF → Base (Google Sheets)
 # =============================================================================
+# (4) REEMPLAZO SOLO del TAB 5 completo:
+#     - modo artículo
+#     - gating dosis
+#     - campos caracterización
+#     - clamp
+# =============================================================================
 
 with tab5:
     st.header("📄 Ingesta de Artículos (PDF) → Base persistente")
 
     st.markdown("""
-Este módulo está pensado para **mejorar la base de datos de manera controlada**:
-1) Subes un PDF.
-2) El sistema **intenta** extraer campos (heurístico).
-3) Tú **confirmas/editar** antes de guardar.
-4) Guardamos como fila en Google Sheets (con `verification_status`).
-5) Entrenas cuando quieras, o activas autoentreno cuando haya ≥ N filas validadas.
+Este módulo está diseñado para **ingestar artículos científicos de manera controlada**:
+1) Subes un PDF.  
+2) El sistema **intenta** extraer campos (heurístico).  
+3) Tú **confirmas/editar** antes de guardar.  
+4) Guardas como **BORRADOR** o como **VALIDADO** (`user_confirmed`).  
+5) El entrenamiento usa **solo filas VALIDADAS** y excluye `inferred`.
     """)
 
-    # -------------------------
     # Guard-rails de GS
-    # -------------------------
     if not gs_enabled:
         st.info("Activa Google Sheets en el panel izquierdo para habilitar guardado persistente.")
     elif not _GS_AVAILABLE:
@@ -1777,28 +1908,21 @@ Este módulo está pensado para **mejorar la base de datos de manera controlada*
     elif not gs_sheet_id or not gs_worksheet:
         st.warning("Completa Sheet ID y Worksheet en el panel izquierdo (o en Secrets).")
     else:
-        # -------------------------
-        # Inputs (con keys únicas)
-        # -------------------------
-        pdf_file = st.file_uploader("Sube PDF del artículo", type=["pdf"], key="t5_pdf_upl")
+        st.subheader("🧾 Modo artículo (PDF)")
+        st.caption("Consejo: extrae, revisa, ajusta, y guarda. Si falta dosis o no estás 100% seguro, guarda BORRADOR.")
 
-        doi_manual = st.text_input(
-            "DOI (opcional)",
-            value="",
-            help="Si el PDF no lo trae claro, escribe el DOI aquí.",
-            key="t5_doi_manual",
-        )
+        # -------------------------
+        # Inputs
+        # -------------------------
+        pdf_file = st.file_uploader("Sube PDF del artículo", type=["pdf"], key="t5_pdf_upl_v2")
 
-        colA, colB = st.columns([1, 1])
+        colA, colB, colC = st.columns([1, 1, 1])
         with colA:
-            extract_btn = st.button(
-                "🔎 Extraer campos (heurístico)",
-                type="primary",
-                disabled=(pdf_file is None),
-                key="t5_extract_btn",
-            )
+            extract_btn = st.button("🔎 Extraer campos", type="primary", disabled=(pdf_file is None), key="t5_extract_btn_v2")
         with colB:
-            clear_btn = st.button("🧹 Limpiar extracción", key="t5_clear_btn")
+            clear_btn = st.button("🧹 Limpiar", key="t5_clear_btn_v2")
+        with colC:
+            max_pages = st.number_input("Páginas a leer (rápido)", min_value=1, max_value=20, value=6, step=1, key="t5_max_pages_v2")
 
         if clear_btn:
             st.session_state.pdf_extract = {}
@@ -1809,55 +1933,31 @@ Este módulo está pensado para **mejorar la base de datos de manera controlada*
         if extract_btn and pdf_file is not None:
             try:
                 with st.spinner("Leyendo PDF y extrayendo..."):
-                    txt = extract_text_from_pdf(pdf_file, max_pages=6)
+                    txt = extract_text_from_pdf(pdf_file, max_pages=int(max_pages))
                     fields = infer_fields_from_text(txt)
-
-                    if doi_manual.strip():
-                        fields["doi"] = doi_manual.strip()
 
                     fields["pdf_filename"] = pdf_file.name
                     fields["ingest_timestamp"] = now_iso()
 
-                    # Guardamos en session_state
-                    st.session_state.pdf_extract = fields
+                    # defaults de calidad: todo lo extraído es "inferred" hasta que el usuario valide
+                    fields["ref_quality"] = "inferred"
 
-                st.success("Extracción realizada. Revisa y ajusta antes de guardar.")
+                    st.session_state.pdf_extract = fields
+                st.success("Extracción realizada. Revisa/ajusta antes de guardar.")
             except Exception as e:
                 st.error(f"No se pudo extraer del PDF: {e}")
 
-        # -------------------------
-        # Confirmación (blindada con keys)
-        # -------------------------
         fields = st.session_state.get("pdf_extract", {}) or {}
+
+        # -------------------------
+        # Confirmación / Edición
+        # -------------------------
         if fields:
-            st.subheader("✅ Confirmación (antes de guardar)")
-            st.caption("Tip: si no conoces dosis o falta un dato clave, guarda como 'Borrador' para no entrenar aún.")
+            st.markdown("---")
+            st.subheader("✅ Revisión y confirmación (antes de guardar)")
 
-            ph_s = safe_float(fields.get("ph"), np.nan)
-            mo_s = safe_float(fields.get("mo"), np.nan)
-            t_p = safe_float(fields.get("T_pirolisis"), np.nan)
-            ph_b = safe_float(fields.get("pH_biochar"), np.nan)
-            bet = safe_float(fields.get("Area_BET"), np.nan)
-            dosis = safe_float(fields.get("dosis_efectiva"), np.nan)
-
-            # Categóricas sugeridas desde extracción
-            feed_s = clean_category_value(fields.get("Feedstock"))
-            tex_s  = clean_category_value(fields.get("Textura"))
-            obj_s  = clean_category_value(fields.get("Objetivo"))
-            tam_s  = clean_category_value(fields.get("Tamaño_biochar"))
-
-            # Aviso si no se detectó dosis (o viene vacía/0)
-            if (not np.isfinite(dosis)) or (float(dosis) <= 0):
-                st.warning(
-                    "No se detectó una dosis en el PDF (o no está en t/ha). "
-                    "Ingresa la dosis manualmente abajo o guarda como BORRADOR."
-                )
-
-            # Helpers locales para preselección robusta
+            # Helpers: selectbox robusto (inyecta sugerido si no existe)
             def _inject_and_index(options: List[str], suggested: Any) -> Tuple[List[str], int]:
-                """
-                Asegura que 'suggested' esté en options (si es válido) y devuelve index.
-                """
                 opts = list(options) if options else []
                 sug = clean_category_value(suggested)
                 if isinstance(sug, float) and np.isnan(sug):
@@ -1867,153 +1967,207 @@ Este módulo está pensado para **mejorar la base de datos de manera controlada*
                 idx = opts.index(sug) if (sug in opts) else 0
                 return opts, idx
 
-            fcol1, fcol2, fcol3 = st.columns(3)
+            def _safe_str(x: Any) -> str:
+                if x is None or (isinstance(x, float) and np.isnan(x)):
+                    return ""
+                return str(x)
 
-            with fcol1:
-                doi = st.text_input(
-                    "doi",
-                    value=str(fields.get("doi", "") or ""),
-                    key="t5_pdf_doi",
-                )
-                fuente = st.text_area(
-                    "Fuente (texto corto)",
-                    value=str(fields.get("Fuente", "") or ""),
-                    height=80,
-                    key="t5_pdf_fuente",
-                )
-                verification_notes = st.text_area(
-                    "Notas de verificación",
-                    value=str(fields.get("verification_notes", "") or ""),
-                    height=80,
-                    key="t5_pdf_verification_notes",
-                )
+            # Metadatos básicos
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                doi_in = st.text_input("DOI (si aplica)", value=_safe_str(fields.get("doi", "")), key="t5_doi_v2")
+                fuente_in = st.text_area("Fuente (texto corto / cita)", value=_safe_str(fields.get("Fuente", "")), height=90, key="t5_fuente_v2")
+            with m2:
+                ref_type_opts = ["experimental", "review", "meta_analysis", "case_study", "other"]
+                ref_type_guess = _safe_str(fields.get("ref_type", "experimental")).strip().lower()
+                if ref_type_guess not in ref_type_opts:
+                    ref_type_guess = "experimental"
+                ref_type_in = st.selectbox("Tipo de artículo (ref_type)", ref_type_opts, index=ref_type_opts.index(ref_type_guess), key="t5_ref_type_v2")
 
-            with fcol2:
-                feed_opts, feed_idx = _inject_and_index(ui_options("Feedstock", DEFAULT_FEEDSTOCKS), feed_s)
-                feedstock_v = st.selectbox(
-                    "Feedstock",
-                    feed_opts,
-                    index=feed_idx if len(feed_opts) else 0,
-                    key="t5_pdf_feedstock_v",
-                )
+                tipo_cultivo_in = st.text_input("Cultivo / sistema reportado (Tipo)", value=_safe_str(fields.get("Tipo", "")), key="t5_tipo_v2")
+                objetivo_opts, objetivo_idx = _inject_and_index(ui_options("Objetivo", DEFAULT_OBJETIVOS), fields.get("Objetivo"))
+                objetivo_in = st.selectbox("Objetivo (si se reporta)", objetivo_opts, index=objetivo_idx if len(objetivo_opts) else 0, key="t5_objetivo_v2")
+            with m3:
+                notes_in = st.text_area("Notas de verificación", value=_safe_str(fields.get("verification_notes", "")), height=90, key="t5_notes_v2")
+                st.caption("Tip: pega aquí cualquier duda: unidades, si es maceta/campo, si el pH es del suelo o del biochar, etc.")
 
-                ph_soil_v = st.number_input(
-                    "ph (suelo)",
-                    value=float(ph_s) if np.isfinite(ph_s) else 6.5,
-                    min_value=3.0,
-                    max_value=9.5,
-                    step=0.1,
-                    key="t5_pdf_ph_soil_v",
-                )
-                mo_v = st.number_input(
-                    "mo (Materia orgánica %)",
-                    value=float(mo_s) if np.isfinite(mo_s) else 2.0,
-                    min_value=0.0,
-                    max_value=20.0,
-                    step=0.1,
-                    key="t5_pdf_mo_v",
-                )
+            st.markdown("### 🧪 Variables (suelo + biochar + caracterización)")
 
-                tex_opts, tex_idx = _inject_and_index(ui_options("Textura", DEFAULT_TEXTURAS), tex_s)
-                textura_v = st.selectbox(
-                    "Textura",
-                    tex_opts,
-                    index=tex_idx if len(tex_opts) else 0,
-                    key="t5_pdf_textura_v",
-                )
+            # Defaults numéricos con clamp (evita StreamlitValueBelowMinError)
+            ph_def = clamp_float(fields.get("ph"), 3.0, 9.5, default=6.5)
+            mo_def = clamp_float(fields.get("mo"), 0.0, 20.0, default=2.0)
+            cic_def = clamp_float(fields.get("CIC"), 0.0, 100.0, default=15.0)
+            met_def = clamp_float(fields.get("Metales"), 0.0, 5000.0, default=0.0)
 
-            with fcol3:
-                T_v = st.number_input(
-                    "T_pirolisis (°C)",
-                    value=float(t_p) if np.isfinite(t_p) else 550.0,
-                    min_value=250.0,
-                    max_value=950.0,
-                    step=10.0,
-                    key="t5_pdf_T_v",
-                )
-                ph_bio_v = st.number_input(
-                    "pH_biochar",
-                    value=float(ph_b) if np.isfinite(ph_b) else 9.0,
-                    min_value=3.0,
-                    max_value=14.0,
-                    step=0.1,
-                    key="t5_pdf_ph_bio_v",
-                )
-                bet_v = st.number_input(
-                    "Area_BET (m²/g)",
-                    value=float(bet) if np.isfinite(bet) else 300.0,
-                    min_value=0.0,
-                    max_value=2000.0,
-                    step=10.0,
-                    key="t5_pdf_bet_v",
-                )
-                dosis_v = st.number_input(
-                    "dosis_efectiva (t/ha)",
-                    value=float(dosis) if np.isfinite(dosis) else 0.0,
-                    min_value=0.0,
-                    max_value=200.0,
-                    step=0.1,
-                    key="t5_pdf_dosis_v",
-                )
+            T_def = clamp_float(fields.get("T_pirolisis"), 250.0, 950.0, default=550.0)
+            phb_def = clamp_float(fields.get("pH_biochar"), 3.0, 14.0, default=9.0)
+            bet_def = clamp_float(fields.get("Area_BET"), 0.0, 2000.0, default=300.0)
 
-            obj_opts, obj_idx = _inject_and_index(ui_options("Objetivo", DEFAULT_OBJETIVOS), obj_s)
-            objetivo_v = st.selectbox(
-                "Objetivo",
-                obj_opts,
-                index=obj_idx if len(obj_opts) else 0,
-                key="t5_pdf_objetivo_v",
+            hum_def = clamp_float(fields.get("Humedad_total"), 0.0, 60.0, default=10.0)
+            vol_def = clamp_float(fields.get("Volatiles"), 0.0, 95.0, default=70.0)
+            ash_def = clamp_float(fields.get("Cenizas_biomasa"), 0.0, 60.0, default=3.0)
+            fc_def  = clamp_float(fields.get("Carbono_fijo"), 0.0, 95.0, default=17.0)
+
+            hc_def = clamp_float(fields.get("H_C_ratio"), 0.0, 2.0, default=0.65)
+            oc_def = clamp_float(fields.get("O_C_ratio"), 0.0, 1.5, default=0.18)
+
+            o2_def = clamp_int(fields.get("O2_ppm"), 0, 50000, default=5000)
+            o2t_def = clamp_float(fields.get("O2_temp_exposicion"), 20.0, 600.0, default=120.0)
+
+            # Categóricas sugeridas desde extracción
+            feed_opts, feed_idx = _inject_and_index(ui_options("Feedstock", DEFAULT_FEEDSTOCKS), fields.get("Feedstock"))
+            tex_opts, tex_idx = _inject_and_index(ui_options("Textura", DEFAULT_TEXTURAS), fields.get("Textura"))
+            est_opts, est_idx = _inject_and_index(ui_options("Estado_suelo", DEFAULT_ESTADOS_SUELO), fields.get("Estado_suelo"))
+            tam_opts, tam_idx = _inject_and_index(ui_options("Tamaño_biochar", DEFAULT_TAMANOS), fields.get("Tamaño_biochar"))
+
+            v1, v2, v3 = st.columns(3)
+            with v1:
+                st.markdown("**Suelo**")
+                ph_in = st.number_input("ph (suelo)", min_value=3.0, max_value=9.5, value=ph_def, step=0.1, key="t5_ph_v2")
+                mo_in = st.number_input("mo (Materia orgánica %)", min_value=0.0, max_value=20.0, value=mo_def, step=0.1, key="t5_mo_v2")
+                cic_in = st.number_input("CIC (cmolc/kg)", min_value=0.0, max_value=100.0, value=cic_def, step=0.5, key="t5_cic_v2")
+                met_in = st.number_input("Metales (mg/kg)", min_value=0.0, max_value=5000.0, value=met_def, step=1.0, key="t5_met_v2")
+                textura_in = st.selectbox("Textura", tex_opts, index=tex_idx if len(tex_opts) else 0, key="t5_textura_v2")
+                estado_in = st.selectbox("Estado_suelo", est_opts, index=est_idx if len(est_opts) else 0, key="t5_estado_v2")
+
+            with v2:
+                st.markdown("**Biochar**")
+                feedstock_in = st.selectbox("Feedstock", feed_opts, index=feed_idx if len(feed_opts) else 0, key="t5_feedstock_v2")
+                T_in = st.number_input("T_pirolisis (°C)", min_value=250.0, max_value=950.0, value=T_def, step=10.0, key="t5_T_v2")
+                phb_in = st.number_input("pH_biochar", min_value=3.0, max_value=14.0, value=phb_def, step=0.1, key="t5_phb_v2")
+                bet_in = st.number_input("Area_BET (m²/g)", min_value=0.0, max_value=2000.0, value=bet_def, step=10.0, key="t5_bet_v2")
+                tam_in = st.selectbox("Tamaño_biochar", tam_opts, index=tam_idx if len(tam_opts) else 0, key="t5_tamano_v2")
+
+            with v3:
+                st.markdown("**Caracterización / Proceso (opcional)**")
+                hum_in = st.number_input("Humedad_total (%)", min_value=0.0, max_value=60.0, value=hum_def, step=0.5, key="t5_hum_v2")
+                vol_in = st.number_input("Volatiles (%)", min_value=0.0, max_value=95.0, value=vol_def, step=0.5, key="t5_vol_v2")
+                ash_in = st.number_input("Cenizas_biomasa (%)", min_value=0.0, max_value=60.0, value=ash_def, step=0.5, key="t5_ash_v2")
+                fc_in = st.number_input("Carbono_fijo (%)", min_value=0.0, max_value=95.0, value=fc_def, step=0.5, key="t5_fc_v2")
+
+                metodo_enf_in = st.selectbox(
+                    "Metodo_enfriamiento",
+                    ["Cámara inerte", "Contacto indirecto", "En aire", "Agua directa", "Desconocido"],
+                    index=4,
+                    key="t5_enf_v2"
+                )
+                o2_in = st.number_input("O2_ppm (si se reporta)", min_value=0, max_value=50000, value=int(o2_def), step=250, key="t5_o2_v2")
+                o2t_in = st.number_input("O2_temp_exposicion (°C)", min_value=20.0, max_value=600.0, value=o2t_def, step=10.0, key="t5_o2t_v2")
+                hc_in = st.number_input("H_C_ratio (molar)", min_value=0.0, max_value=2.0, value=hc_def, step=0.01, key="t5_hc_v2")
+                oc_in = st.number_input("O_C_ratio (molar)", min_value=0.0, max_value=1.5, value=oc_def, step=0.01, key="t5_oc_v2")
+
+            st.markdown("### 🎯 Dosis (gating de validación)")
+            dosis_def = clamp_float(fields.get("dosis_efectiva"), 0.0, 200.0, default=0.0)
+            dosis_in = st.number_input("dosis_efectiva (t/ha)", min_value=0.0, max_value=200.0, value=dosis_def, step=0.1, key="t5_dosis_v2")
+
+            # Estado de verificación + gating
+            st.markdown("---")
+            st.subheader("🗃️ Estado del registro (y entrenamiento)")
+
+            estado_registro = st.radio(
+                "¿Cómo deseas guardar este registro?",
+                ["BORRADOR (no entrena)", "VALIDADO (user_confirmed → entra a entrenamiento)"],
+                index=0,
+                horizontal=True,
+                key="t5_estado_registro_v2",
             )
 
-            tam_opts, tam_idx = _inject_and_index(ui_options("Tamaño_biochar", DEFAULT_TAMANOS), tam_s)
-            tamano_v = st.selectbox(
-                "Tamaño_biochar",
-                tam_opts,
-                index=tam_idx if len(tam_opts) else 0,
-                key="t5_pdf_tamano_v",
-            )
+            confirm_dose = False
+            if estado_registro.startswith("VALIDADO"):
+                st.warning("VALIDADO exige confirmar la dosis.")
+                confirm_dose = st.checkbox(
+                    "Confirmo que la dosis está reportada en el artículo y corresponde a t/ha (o Mg/ha).",
+                    value=False,
+                    key="t5_confirm_dose_v2",
+                )
 
-            save_as_confirmed = st.checkbox(
-                "Guardar como VALIDADO (entra a entrenamiento)",
-                value=(dosis_v > 0),
-                key="t5_pdf_save_as_confirmed",
-            )
-            verification_status = "user_confirmed" if save_as_confirmed else "draft"
+            can_validate = (estado_registro.startswith("VALIDADO") and (dosis_in > 0) and confirm_dose)
 
-            if (not save_as_confirmed) and (dosis_v > 0):
-                st.info("Puedes marcarlo como validado si confirmas que esa dosis viene efectivamente del artículo.")
+            if estado_registro.startswith("VALIDADO") and (dosis_in <= 0):
+                st.error("No puedes guardar VALIDADO sin una dosis > 0.")
+            if estado_registro.startswith("VALIDADO") and (not confirm_dose):
+                st.info("Marca la casilla de confirmación para habilitar guardado VALIDADO.")
+
+            verification_status = "user_confirmed" if can_validate else "draft"
+            ref_quality = "confirmed" if can_validate else "inferred"
+
+            # DOI checks
+            doi_format_ok = bool(_DOI_FULL_RE.match(doi_in.strip())) if doi_in.strip() else False
+            doi_url = f"https://doi.org/{doi_in.strip()}" if doi_in.strip() and doi_format_ok else ""
+
+            # ref_id razonable
+            fn = _safe_str(fields.get("pdf_filename", "pdf")).strip()
+            fn_slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", fn)[:80]
+            ref_id = f"pdf_{now_iso().replace(':','').replace('-','')}_{fn_slug}"
 
             row = {
-                "ph": ph_soil_v,
-                "mo": mo_v,
-                "Textura": textura_v,
-                "Feedstock": feedstock_v,
-                "T_pirolisis": T_v,
-                "pH_biochar": ph_bio_v,
-                "Area_BET": bet_v,
-                "Tamaño_biochar": tamano_v,
-                "Objetivo": objetivo_v,
-                "dosis_efectiva": dosis_v if dosis_v > 0 else "",
-                "Fuente": fuente,
-                "doi": doi,
+                # FEATURES
+                "ph": ph_in,
+                "mo": mo_in,
+                "CIC": cic_in,
+                "Metales": met_in,
+                "Textura": textura_in,
+                "Estado_suelo": estado_in,
+
+                "Feedstock": feedstock_in,
+                "T_pirolisis": T_in,
+                "pH_biochar": phb_in,
+                "Area_BET": bet_in,
+                "Tamaño_biochar": tam_in,
+
+                "Objetivo": objetivo_in,
+                "Tipo": tipo_cultivo_in,
+
+                # Caracterización / proceso (opcionales)
+                "Humedad_total": hum_in,
+                "Volatiles": vol_in,
+                "Cenizas_biomasa": ash_in,
+                "Carbono_fijo": fc_in,
+                "Metodo_enfriamiento": metodo_enf_in,
+                "O2_ppm": int(o2_in),
+                "O2_temp_exposicion": o2t_in,
+                "H_C_ratio": hc_in,
+                "O_C_ratio": oc_in,
+
+                # TARGET
+                "dosis_efectiva": float(dosis_in) if dosis_in > 0 else "",
+
+                # METADATA
+                "Fuente": fuente_in,
+                "Fuente_raw": fn,
+                "doi": doi_in.strip(),
+                "doi_format_ok": str(doi_format_ok),
+                "doi_url": doi_url,
+                "ref_type": ref_type_in,
+                "ref_id": ref_id,
+                "ref_quality": ref_quality,
                 "verification_status": verification_status,
-                "verification_notes": verification_notes,
+                "verification_notes": notes_in,
                 "ingest_timestamp": fields.get("ingest_timestamp", now_iso()),
-                "pdf_filename": fields.get("pdf_filename", ""),
+                "pdf_filename": fn,
             }
 
             required_headers = unique_sorted(
                 list(row.keys()) +
                 META_COLS +
-                ["ph", "mo", "Textura", "Feedstock", "T_pirolisis", "pH_biochar", "Area_BET", "Tamaño_biochar", "Objetivo", "dosis_efectiva"]
+                [TARGET_COL] +
+                [
+                    "ph", "mo", "CIC", "Metales", "Textura", "Estado_suelo",
+                    "Feedstock", "T_pirolisis", "pH_biochar", "Area_BET", "Tamaño_biochar",
+                    "Objetivo", "Tipo",
+                    "Humedad_total", "Volatiles", "Cenizas_biomasa", "Carbono_fijo",
+                    "Metodo_enfriamiento", "O2_ppm", "O2_temp_exposicion", "H_C_ratio", "O_C_ratio",
+                ]
             )
 
             st.markdown("---")
-            if st.button("💾 Guardar fila en Google Sheets", type="primary", key="t5_pdf_btn_save_row"):
+            save_disabled = (estado_registro.startswith("VALIDADO") and (not can_validate))
+            if st.button("💾 Guardar fila en Google Sheets", type="primary", key="t5_save_v2", disabled=save_disabled):
                 try:
                     gs_append_row(gs_sheet_id, gs_worksheet, row, required_headers=required_headers)
-                    st.success("Fila guardada ✅")
+                    st.success(f"Fila guardada ✅  (verification_status = {verification_status}, ref_quality = {ref_quality})")
                     st.cache_data.clear()
-                    st.caption("Tip: ve a 'Entrenamiento XGBoost' para entrenar ahora, o activa el autoentreno en el panel izquierdo.")
+                    st.caption("Tip: ve a 'Entrenamiento XGBoost' para entrenar, o activa autoentreno en el panel izquierdo.")
                 except Exception as e:
                     st.error(f"No se pudo guardar en Sheets: {e}")
 
@@ -2031,6 +2185,3 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-
-
-
