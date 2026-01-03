@@ -1,4 +1,4 @@
-# VERSIÓN ENERO 02 2026 4:55PM  (con correcciones 1–4 aplicadas)
+# VERSIÓN ENERO 02 2026 4:55PM  (fix StreamlitValueBelowMinError persistente por session_state)
 import os
 import io
 import re
@@ -111,14 +111,93 @@ def clamp_float(x: Any, min_value: float, max_value: float, default: Optional[fl
     v = safe_float(x, default=np.nan)
     if not np.isfinite(v):
         v = default if default is not None else min_value
-    return float(np.clip(float(v), float(min_value), float(max_value)))
+    v = float(v)
+    if v < min_value:
+        v = float(min_value)
+    if v > max_value:
+        v = float(max_value)
+    return float(v)
 
 def clamp_int(x: Any, min_value: int, max_value: int, default: Optional[int] = None) -> int:
     v = safe_float(x, default=np.nan)
     if not np.isfinite(v):
         v = default if default is not None else min_value
     v = int(round(float(v)))
-    return int(np.clip(v, int(min_value), int(max_value)))
+    if v < min_value:
+        v = int(min_value)
+    if v > max_value:
+        v = int(max_value)
+    return int(v)
+
+# -------------------------------------------------------------------------
+# FIX CRÍTICO:
+# Streamlit usa st.session_state[key] si ya existía el widget.
+# Si ese valor queda por debajo del min_value, explota.
+# Estas funciones "sanitizan" el session_state ANTES de crear el widget.
+# -------------------------------------------------------------------------
+def ensure_state_float_in_range(key: str, min_value: float, max_value: float, default: float) -> None:
+    if key in st.session_state:
+        v = safe_float(st.session_state.get(key), default=np.nan)
+        if not np.isfinite(v):
+            st.session_state[key] = float(default)
+        else:
+            st.session_state[key] = float(np.clip(float(v), float(min_value), float(max_value)))
+    else:
+        st.session_state[key] = float(np.clip(float(default), float(min_value), float(max_value)))
+
+def ensure_state_int_in_range(key: str, min_value: int, max_value: int, default: int) -> None:
+    if key in st.session_state:
+        v = safe_float(st.session_state.get(key), default=np.nan)
+        if not np.isfinite(v):
+            st.session_state[key] = int(default)
+        else:
+            st.session_state[key] = int(np.clip(int(round(float(v))), int(min_value), int(max_value)))
+    else:
+        st.session_state[key] = int(np.clip(int(default), int(min_value), int(max_value)))
+
+def safe_number_input(
+    label: str,
+    key: str,
+    min_value: float,
+    max_value: float,
+    value: Any,
+    step: float = 0.1,
+    help: Optional[str] = None,
+    format: Optional[str] = None,
+) -> float:
+    default = clamp_float(value, min_value, max_value, default=min_value)
+    ensure_state_float_in_range(key, min_value, max_value, default)
+    return st.number_input(
+        label,
+        min_value=float(min_value),
+        max_value=float(max_value),
+        value=float(st.session_state[key]),
+        step=float(step),
+        key=key,
+        help=help,
+        format=format
+    )
+
+def safe_int_input(
+    label: str,
+    key: str,
+    min_value: int,
+    max_value: int,
+    value: Any,
+    step: int = 1,
+    help: Optional[str] = None,
+) -> int:
+    default = clamp_int(value, min_value, max_value, default=min_value)
+    ensure_state_int_in_range(key, min_value, max_value, default)
+    return st.number_input(
+        label,
+        min_value=int(min_value),
+        max_value=int(max_value),
+        value=int(st.session_state[key]),
+        step=int(step),
+        key=key,
+        help=help,
+    )
 
 def norm_tamano(label: str) -> str:
     s = (label or "").strip().lower()
@@ -360,7 +439,6 @@ def gs_get_client():
         import json as _json
         sa_info = _json.loads(sa_info)
 
-    # scopes recomendados para leer/escribir Sheets y evitar sorpresas
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -370,9 +448,6 @@ def gs_get_client():
     return client
 
 def gs_open_worksheet(sh, worksheet_name: str, rows: int = 200, cols: int = 40):
-    """
-    Abre un worksheet. Si no existe, lo crea.
-    """
     try:
         return sh.worksheet(worksheet_name)
     except Exception:
@@ -426,21 +501,14 @@ def gs_append_row(sheet_id: str, worksheet_name: str, row_dict: Dict[str, Any], 
     ws.append_row(row, value_input_option="USER_ENTERED")
 
 def gs_test_read_write(sheet_id: str, data_ws: str, test_ws: str = "healthcheck") -> Dict[str, Any]:
-    """
-    Prueba segura:
-    - Lee data_ws (cuenta filas/columnas)
-    - Escribe 1 fila en test_ws (healthcheck) con timestamp
-    """
     client = gs_get_client()
     sh = client.open_by_key(sheet_id)
 
-    # lectura del ws de datos
     ws_data = gs_open_worksheet(sh, data_ws)
     vals = ws_data.get_all_values()
     n_rows = max(0, len(vals) - 1) if vals else 0
     n_cols = len(vals[0]) if vals and len(vals) > 0 else 0
 
-    # escritura en ws de test
     ws_test = gs_open_worksheet(sh, test_ws)
     headers = gs_ensure_headers(ws_test, ["ping_timestamp", "note"])
     ws_test.append_row([now_iso(), "streamlit_ping_ok"], value_input_option="USER_ENTERED")
@@ -503,23 +571,10 @@ def _pick_first_number_in_range(nums: List[float], lo: float, hi: float) -> Opti
             return float(n)
     return None
 
-# -------------------------------------------------------------------------
-# (2) REEMPLAZO COMPLETO: infer_fields_from_text(...)
-#     - pH context-aware (suelo vs biochar)
-#     - cassava/yuca
-#     - tipo_artículo (ref_type)
-#     - proximal opcional (humedad/volátiles/cenizas/FC + ratios H/C y O/C si aparecen)
-# -------------------------------------------------------------------------
 def infer_fields_from_text(text: str) -> Dict[str, Any]:
-    """
-    Heurísticas conservadoras. Se espera que el usuario confirme/edite.
-    Salida: keys canónicas usadas por el sistema (ph, mo, T_pirolisis, pH_biochar, Area_BET, dosis_efectiva, etc.)
-    + metadata: doi, ref_type, (y opcionalmente) proximate, H/C, O/C.
-    """
     out: Dict[str, Any] = {}
     text = text or ""
 
-    # DOI (primer match)
     m = _DOI_RE.search(text)
     if m:
         doi = m.group(1).strip().rstrip(").,;")
@@ -528,22 +583,19 @@ def infer_fields_from_text(text: str) -> Dict[str, Any]:
     t_norm = strip_accents(text).lower()
     t_num = text.replace(",", ".")
 
-    # Tipo de artículo (ref_type)
     ref_type = "experimental"
     if any(k in t_norm for k in ["systematic review", "review article", "literature review", "revision bibliografica", "revisión bibliográfica"]):
         ref_type = "review"
-    if any(k in t_norm for k in ["meta-analysis", "metaanalysis", "meta analysis", "metaanálisis", "meta-analisis", "meta análisis"]):
+    if any(k in t_norm for k in ["meta-analysis", "metaanalysis", "meta analysis", "metaanalálisis", "meta-analisis", "meta análisis"]):
         ref_type = "meta_analysis"
     if any(k in t_norm for k in ["case study", "caso de estudio"]):
         ref_type = "case_study"
     out["ref_type"] = ref_type
 
-    # BET
     m_bet = re.search(r"\bBET\b[^0-9]{0,40}(\d{1,5}(?:\.\d+)?)\s*(?:m2/g|m²/g|m\^2/g)", t_num, flags=re.IGNORECASE)
     if m_bet:
         out["Area_BET"] = safe_float(m_bet.group(1), default=np.nan)
 
-    # pH context-aware: clasificamos por ventana de contexto
     ph_matches = list(re.finditer(r"\bpH\b[^0-9]{0,12}(\d(?:\.\d+)?)", t_num, flags=re.IGNORECASE))
     for mm in ph_matches:
         val = safe_float(mm.group(1), default=np.nan)
@@ -567,30 +619,25 @@ def infer_fields_from_text(text: str) -> Dict[str, Any]:
             out["ph"] = float(val)
             continue
 
-        # fallback si ambos ya están o no quedó claro:
         if "ph" not in out:
             out["ph"] = float(val)
         elif "pH_biochar" not in out:
             out["pH_biochar"] = float(val)
 
-    # Temperaturas probables (°C)
     temps = [safe_float(x, np.nan) for x in re.findall(r"(\d{3,4})\s*°?\s*C", t_num, flags=re.IGNORECASE)]
     temps = [float(x) for x in temps if np.isfinite(x)]
 
-    # Temperatura de pirólisis (contexto pyro/pirol)
     mT = re.search(r"(?:pyrolys(?:is|ed)?|pirol(?:isis|isis|izado)|carboniz|torref)[^0-9]{0,80}(\d{3,4})\s*°?\s*C",
                    t_num, flags=re.IGNORECASE)
     if mT:
         out["T_pirolisis"] = safe_float(mT.group(1), default=np.nan)
     else:
-        # HTT (Hydrothermal / HTC)
         mHTT = re.search(r"\bHTT\b[^0-9]{0,30}(\d{2,4}(?:\.\d+)?)\s*°?\s*C", t_num, flags=re.IGNORECASE)
         if mHTT:
             out["T_pirolisis"] = safe_float(mHTT.group(1), default=np.nan)
         else:
             out["T_pirolisis"] = _pick_first_number_in_range(temps, 300, 900)
 
-    # Dosis (t/ha o Mg/ha -> equivalente)
     mD = re.search(r"(\d+(?:\.\d+)?)\s*(?:t\s*/\s*ha|ton\s*/\s*ha|t\s*ha-1|t\s*ha−1|t\s*ha\^-1|t\s*ha\s*-1)",
                    t_num, flags=re.IGNORECASE)
     if not mD:
@@ -599,13 +646,11 @@ def infer_fields_from_text(text: str) -> Dict[str, Any]:
     if mD:
         out["dosis_efectiva"] = safe_float(mD.group(1), default=np.nan)
 
-    # Materia orgánica (MO / OM)
     mmo = re.search(r"(?:materia\s*organica|materia\s*orgánica|organic\s*matter|\bOM\b)[^0-9]{0,25}(\d+(?:\.\d+)?)\s*%?",
                     t_num, flags=re.IGNORECASE)
     if mmo:
         out["mo"] = safe_float(mmo.group(1), default=np.nan)
 
-    # Proximate analysis (opcionales)
     def _grab_pct(patterns: List[str]) -> Optional[float]:
         for pat in patterns:
             mm = re.search(pat, t_num, flags=re.IGNORECASE)
@@ -640,7 +685,6 @@ def infer_fields_from_text(text: str) -> Dict[str, Any]:
     if fc is not None:
         out["Carbono_fijo"] = fc
 
-    # Ratios H/C y O/C (si aparecen)
     m_hc = re.search(r"\bH\s*/\s*C\b[^0-9]{0,15}(\d(?:\.\d+)?)", t_num, flags=re.IGNORECASE)
     if m_hc:
         out["H_C_ratio"] = safe_float(m_hc.group(1), default=np.nan)
@@ -648,7 +692,6 @@ def infer_fields_from_text(text: str) -> Dict[str, Any]:
     if m_oc:
         out["O_C_ratio"] = safe_float(m_oc.group(1), default=np.nan)
 
-    # Feedstock (heurístico, incluye cassava/yuca)
     feed_map = [
         (["coconut", "coco"], "Cáscara coco"),
         (["cacao", "cocoa"], "Cáscara cacao"),
@@ -1058,23 +1101,16 @@ META_COLS = [
     "ingest_timestamp","pdf_filename"
 ]
 
-# -------------------------------------------------------------------------
-# (3) AJUSTE ENTRENAMIENTO:
-#     - filtra SOLO verification_status == user_confirmed (si existe)
-#     - excluye ref_quality == inferred (si existe)
-# -------------------------------------------------------------------------
 def entrenar_modelo_xgb_pipeline(df_raw: pd.DataFrame, target: str = TARGET_COL) -> Tuple[Pipeline, float, List[str], pd.DataFrame]:
     if target not in df_raw.columns:
         raise ValueError(f"El dataset debe incluir la columna '{target}'")
 
     df = df_raw.copy()
 
-    # Solo filas user_confirmed (si existe la columna)
     if "verification_status" in df.columns:
         vs = df["verification_status"].astype(str).str.strip().str.lower()
         df = df[vs == "user_confirmed"].copy()
 
-    # Excluir inferred (si existe ref_quality o Fuente_status)
     if "ref_quality" in df.columns:
         rq = df["ref_quality"].astype(str).str.strip().str.lower()
         df = df[rq != "inferred"].copy()
@@ -1242,7 +1278,6 @@ datos_excel = cargar_datos_excel(excel_path) if excel_path else None
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🗂️ Persistencia (Google Sheets)")
 
-# ✅ Defaults desde Secrets (st.secrets["google_sheets"])
 _secrets_gs = st.secrets.get("google_sheets", {})
 DEFAULT_GS_SHEET_ID = extract_sheet_id(_secrets_gs.get("sheet_id", "")) if isinstance(_secrets_gs, dict) else ""
 DEFAULT_GS_WORKSHEET = (_secrets_gs.get("worksheet", "data") if isinstance(_secrets_gs, dict) else "data")
@@ -1311,7 +1346,6 @@ with st.sidebar.expander("Cómo configurar Google Sheets", expanded=False):
 - Recuerda: el Sheet debe estar **compartido** con el email de la Service Account como **Editor**.
     """)
 
-# header
 col1, col2 = st.columns([3, 1])
 with col1:
     st.markdown('<div class="main-header">🧬 Prescriptor Híbrido Biochar</div>', unsafe_allow_html=True)
@@ -1368,7 +1402,6 @@ def count_confirmed_rows(df: pd.DataFrame) -> int:
         return int((df["verification_status"].astype(str).str.lower() == "user_confirmed").sum())
     return int(len(df))
 
-# Autoentreno opcional con Google Sheets
 if gs_enabled and auto_train and gs_sheet_id and gs_worksheet:
     try:
         df_gs = load_dataset_from_gs()
@@ -1385,7 +1418,6 @@ if gs_enabled and auto_train and gs_sheet_id and gs_worksheet:
     except Exception:
         pass
 
-# Autoentreno opcional desde Excel
 auto_train_excel = st.sidebar.checkbox(
     "Autoentrenar al iniciar usando Dosis_experimental (Excel)",
     value=False,
@@ -1881,12 +1913,6 @@ with tab4:
 # =============================================================================
 # TAB 5 — PDF → Base (Google Sheets)
 # =============================================================================
-# (4) REEMPLAZO SOLO del TAB 5 completo:
-#     - modo artículo
-#     - gating dosis
-#     - campos caracterización
-#     - clamp
-# =============================================================================
 
 with tab5:
     st.header("📄 Ingesta de Artículos (PDF) → Base persistente")
@@ -1900,7 +1926,6 @@ Este módulo está diseñado para **ingestar artículos científicos de manera c
 5) El entrenamiento usa **solo filas VALIDADAS** y excluye `inferred`.
     """)
 
-    # Guard-rails de GS
     if not gs_enabled:
         st.info("Activa Google Sheets en el panel izquierdo para habilitar guardado persistente.")
     elif not _GS_AVAILABLE:
@@ -1911,9 +1936,6 @@ Este módulo está diseñado para **ingestar artículos científicos de manera c
         st.subheader("🧾 Modo artículo (PDF)")
         st.caption("Consejo: extrae, revisa, ajusta, y guarda. Si falta dosis o no estás 100% seguro, guarda BORRADOR.")
 
-        # -------------------------
-        # Inputs
-        # -------------------------
         pdf_file = st.file_uploader("Sube PDF del artículo", type=["pdf"], key="t5_pdf_upl_v2")
 
         colA, colB, colC = st.columns([1, 1, 1])
@@ -1927,9 +1949,6 @@ Este módulo está diseñado para **ingestar artículos científicos de manera c
         if clear_btn:
             st.session_state.pdf_extract = {}
 
-        # -------------------------
-        # Extracción heurística
-        # -------------------------
         if extract_btn and pdf_file is not None:
             try:
                 with st.spinner("Leyendo PDF y extrayendo..."):
@@ -1938,8 +1957,6 @@ Este módulo está diseñado para **ingestar artículos científicos de manera c
 
                     fields["pdf_filename"] = pdf_file.name
                     fields["ingest_timestamp"] = now_iso()
-
-                    # defaults de calidad: todo lo extraído es "inferred" hasta que el usuario valide
                     fields["ref_quality"] = "inferred"
 
                     st.session_state.pdf_extract = fields
@@ -1949,14 +1966,10 @@ Este módulo está diseñado para **ingestar artículos científicos de manera c
 
         fields = st.session_state.get("pdf_extract", {}) or {}
 
-        # -------------------------
-        # Confirmación / Edición
-        # -------------------------
         if fields:
             st.markdown("---")
             st.subheader("✅ Revisión y confirmación (antes de guardar)")
 
-            # Helpers: selectbox robusto (inyecta sugerido si no existe)
             def _inject_and_index(options: List[str], suggested: Any) -> Tuple[List[str], int]:
                 opts = list(options) if options else []
                 sug = clean_category_value(suggested)
@@ -1972,7 +1985,6 @@ Este módulo está diseñado para **ingestar artículos científicos de manera c
                     return ""
                 return str(x)
 
-            # Metadatos básicos
             m1, m2, m3 = st.columns(3)
             with m1:
                 doi_in = st.text_input("DOI (si aplica)", value=_safe_str(fields.get("doi", "")), key="t5_doi_v2")
@@ -1993,13 +2005,12 @@ Este módulo está diseñado para **ingestar artículos científicos de manera c
 
             st.markdown("### 🧪 Variables (suelo + biochar + caracterización)")
 
-            # Defaults numéricos con clamp (evita StreamlitValueBelowMinError)
-            ph_def = clamp_float(fields.get("ph"), 3.0, 9.5, default=6.5)
-            mo_def = clamp_float(fields.get("mo"), 0.0, 20.0, default=2.0)
+            ph_def  = clamp_float(fields.get("ph"), 3.0, 9.5, default=6.5)
+            mo_def  = clamp_float(fields.get("mo"), 0.0, 20.0, default=2.0)
             cic_def = clamp_float(fields.get("CIC"), 0.0, 100.0, default=15.0)
             met_def = clamp_float(fields.get("Metales"), 0.0, 5000.0, default=0.0)
 
-            T_def = clamp_float(fields.get("T_pirolisis"), 250.0, 950.0, default=550.0)
+            T_def   = clamp_float(fields.get("T_pirolisis"), 250.0, 950.0, default=550.0)
             phb_def = clamp_float(fields.get("pH_biochar"), 3.0, 14.0, default=9.0)
             bet_def = clamp_float(fields.get("Area_BET"), 0.0, 2000.0, default=300.0)
 
@@ -2008,42 +2019,41 @@ Este módulo está diseñado para **ingestar artículos científicos de manera c
             ash_def = clamp_float(fields.get("Cenizas_biomasa"), 0.0, 60.0, default=3.0)
             fc_def  = clamp_float(fields.get("Carbono_fijo"), 0.0, 95.0, default=17.0)
 
-            hc_def = clamp_float(fields.get("H_C_ratio"), 0.0, 2.0, default=0.65)
-            oc_def = clamp_float(fields.get("O_C_ratio"), 0.0, 1.5, default=0.18)
+            hc_def  = clamp_float(fields.get("H_C_ratio"), 0.0, 2.0, default=0.65)
+            oc_def  = clamp_float(fields.get("O_C_ratio"), 0.0, 1.5, default=0.18)
 
-            o2_def = clamp_int(fields.get("O2_ppm"), 0, 50000, default=5000)
+            o2_def  = clamp_int(fields.get("O2_ppm"), 0, 50000, default=5000)
             o2t_def = clamp_float(fields.get("O2_temp_exposicion"), 20.0, 600.0, default=120.0)
 
-            # Categóricas sugeridas desde extracción
             feed_opts, feed_idx = _inject_and_index(ui_options("Feedstock", DEFAULT_FEEDSTOCKS), fields.get("Feedstock"))
-            tex_opts, tex_idx = _inject_and_index(ui_options("Textura", DEFAULT_TEXTURAS), fields.get("Textura"))
-            est_opts, est_idx = _inject_and_index(ui_options("Estado_suelo", DEFAULT_ESTADOS_SUELO), fields.get("Estado_suelo"))
-            tam_opts, tam_idx = _inject_and_index(ui_options("Tamaño_biochar", DEFAULT_TAMANOS), fields.get("Tamaño_biochar"))
+            tex_opts,  tex_idx  = _inject_and_index(ui_options("Textura", DEFAULT_TEXTURAS), fields.get("Textura"))
+            est_opts,  est_idx  = _inject_and_index(ui_options("Estado_suelo", DEFAULT_ESTADOS_SUELO), fields.get("Estado_suelo"))
+            tam_opts,  tam_idx  = _inject_and_index(ui_options("Tamaño_biochar", DEFAULT_TAMANOS), fields.get("Tamaño_biochar"))
 
             v1, v2, v3 = st.columns(3)
             with v1:
                 st.markdown("**Suelo**")
-                ph_in = st.number_input("ph (suelo)", min_value=3.0, max_value=9.5, value=ph_def, step=0.1, key="t5_ph_v2")
-                mo_in = st.number_input("mo (Materia orgánica %)", min_value=0.0, max_value=20.0, value=mo_def, step=0.1, key="t5_mo_v2")
-                cic_in = st.number_input("CIC (cmolc/kg)", min_value=0.0, max_value=100.0, value=cic_def, step=0.5, key="t5_cic_v2")
-                met_in = st.number_input("Metales (mg/kg)", min_value=0.0, max_value=5000.0, value=met_def, step=1.0, key="t5_met_v2")
+                ph_in  = safe_number_input("ph (suelo)", key="t5_ph_v2", min_value=3.0, max_value=9.5, value=ph_def, step=0.1)
+                mo_in  = safe_number_input("mo (Materia orgánica %)", key="t5_mo_v2", min_value=0.0, max_value=20.0, value=mo_def, step=0.1)
+                cic_in = safe_number_input("CIC (cmolc/kg)", key="t5_cic_v2", min_value=0.0, max_value=100.0, value=cic_def, step=0.5)
+                met_in = safe_number_input("Metales (mg/kg)", key="t5_met_v2", min_value=0.0, max_value=5000.0, value=met_def, step=1.0)
                 textura_in = st.selectbox("Textura", tex_opts, index=tex_idx if len(tex_opts) else 0, key="t5_textura_v2")
-                estado_in = st.selectbox("Estado_suelo", est_opts, index=est_idx if len(est_opts) else 0, key="t5_estado_v2")
+                estado_in  = st.selectbox("Estado_suelo", est_opts, index=est_idx if len(est_opts) else 0, key="t5_estado_v2")
 
             with v2:
                 st.markdown("**Biochar**")
                 feedstock_in = st.selectbox("Feedstock", feed_opts, index=feed_idx if len(feed_opts) else 0, key="t5_feedstock_v2")
-                T_in = st.number_input("T_pirolisis (°C)", min_value=250.0, max_value=950.0, value=T_def, step=10.0, key="t5_T_v2")
-                phb_in = st.number_input("pH_biochar", min_value=3.0, max_value=14.0, value=phb_def, step=0.1, key="t5_phb_v2")
-                bet_in = st.number_input("Area_BET (m²/g)", min_value=0.0, max_value=2000.0, value=bet_def, step=10.0, key="t5_bet_v2")
+                T_in   = safe_number_input("T_pirolisis (°C)", key="t5_T_v2", min_value=250.0, max_value=950.0, value=T_def, step=10.0)
+                phb_in = safe_number_input("pH_biochar", key="t5_phb_v2", min_value=3.0, max_value=14.0, value=phb_def, step=0.1)
+                bet_in = safe_number_input("Area_BET (m²/g)", key="t5_bet_v2", min_value=0.0, max_value=2000.0, value=bet_def, step=10.0)
                 tam_in = st.selectbox("Tamaño_biochar", tam_opts, index=tam_idx if len(tam_opts) else 0, key="t5_tamano_v2")
 
             with v3:
                 st.markdown("**Caracterización / Proceso (opcional)**")
-                hum_in = st.number_input("Humedad_total (%)", min_value=0.0, max_value=60.0, value=hum_def, step=0.5, key="t5_hum_v2")
-                vol_in = st.number_input("Volatiles (%)", min_value=0.0, max_value=95.0, value=vol_def, step=0.5, key="t5_vol_v2")
-                ash_in = st.number_input("Cenizas_biomasa (%)", min_value=0.0, max_value=60.0, value=ash_def, step=0.5, key="t5_ash_v2")
-                fc_in = st.number_input("Carbono_fijo (%)", min_value=0.0, max_value=95.0, value=fc_def, step=0.5, key="t5_fc_v2")
+                hum_in = safe_number_input("Humedad_total (%)", key="t5_hum_v2", min_value=0.0, max_value=60.0, value=hum_def, step=0.5)
+                vol_in = safe_number_input("Volatiles (%)", key="t5_vol_v2", min_value=0.0, max_value=95.0, value=vol_def, step=0.5)
+                ash_in = safe_number_input("Cenizas_biomasa (%)", key="t5_ash_v2", min_value=0.0, max_value=60.0, value=ash_def, step=0.5)
+                fc_in  = safe_number_input("Carbono_fijo (%)", key="t5_fc_v2", min_value=0.0, max_value=95.0, value=fc_def, step=0.5)
 
                 metodo_enf_in = st.selectbox(
                     "Metodo_enfriamiento",
@@ -2051,16 +2061,15 @@ Este módulo está diseñado para **ingestar artículos científicos de manera c
                     index=4,
                     key="t5_enf_v2"
                 )
-                o2_in = st.number_input("O2_ppm (si se reporta)", min_value=0, max_value=50000, value=int(o2_def), step=250, key="t5_o2_v2")
-                o2t_in = st.number_input("O2_temp_exposicion (°C)", min_value=20.0, max_value=600.0, value=o2t_def, step=10.0, key="t5_o2t_v2")
-                hc_in = st.number_input("H_C_ratio (molar)", min_value=0.0, max_value=2.0, value=hc_def, step=0.01, key="t5_hc_v2")
-                oc_in = st.number_input("O_C_ratio (molar)", min_value=0.0, max_value=1.5, value=oc_def, step=0.01, key="t5_oc_v2")
+                o2_in  = safe_int_input("O2_ppm (si se reporta)", key="t5_o2_v2", min_value=0, max_value=50000, value=o2_def, step=250)
+                o2t_in = safe_number_input("O2_temp_exposicion (°C)", key="t5_o2t_v2", min_value=20.0, max_value=600.0, value=o2t_def, step=10.0)
+                hc_in  = safe_number_input("H_C_ratio (molar)", key="t5_hc_v2", min_value=0.0, max_value=2.0, value=hc_def, step=0.01)
+                oc_in  = safe_number_input("O_C_ratio (molar)", key="t5_oc_v2", min_value=0.0, max_value=1.5, value=oc_def, step=0.01)
 
             st.markdown("### 🎯 Dosis (gating de validación)")
             dosis_def = clamp_float(fields.get("dosis_efectiva"), 0.0, 200.0, default=0.0)
-            dosis_in = st.number_input("dosis_efectiva (t/ha)", min_value=0.0, max_value=200.0, value=dosis_def, step=0.1, key="t5_dosis_v2")
+            dosis_in = safe_number_input("dosis_efectiva (t/ha)", key="t5_dosis_v2", min_value=0.0, max_value=200.0, value=dosis_def, step=0.1)
 
-            # Estado de verificación + gating
             st.markdown("---")
             st.subheader("🗃️ Estado del registro (y entrenamiento)")
 
@@ -2091,17 +2100,14 @@ Este módulo está diseñado para **ingestar artículos científicos de manera c
             verification_status = "user_confirmed" if can_validate else "draft"
             ref_quality = "confirmed" if can_validate else "inferred"
 
-            # DOI checks
             doi_format_ok = bool(_DOI_FULL_RE.match(doi_in.strip())) if doi_in.strip() else False
             doi_url = f"https://doi.org/{doi_in.strip()}" if doi_in.strip() and doi_format_ok else ""
 
-            # ref_id razonable
             fn = _safe_str(fields.get("pdf_filename", "pdf")).strip()
             fn_slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", fn)[:80]
             ref_id = f"pdf_{now_iso().replace(':','').replace('-','')}_{fn_slug}"
 
             row = {
-                # FEATURES
                 "ph": ph_in,
                 "mo": mo_in,
                 "CIC": cic_in,
@@ -2118,7 +2124,6 @@ Este módulo está diseñado para **ingestar artículos científicos de manera c
                 "Objetivo": objetivo_in,
                 "Tipo": tipo_cultivo_in,
 
-                # Caracterización / proceso (opcionales)
                 "Humedad_total": hum_in,
                 "Volatiles": vol_in,
                 "Cenizas_biomasa": ash_in,
@@ -2129,10 +2134,8 @@ Este módulo está diseñado para **ingestar artículos científicos de manera c
                 "H_C_ratio": hc_in,
                 "O_C_ratio": oc_in,
 
-                # TARGET
                 "dosis_efectiva": float(dosis_in) if dosis_in > 0 else "",
 
-                # METADATA
                 "Fuente": fuente_in,
                 "Fuente_raw": fn,
                 "doi": doi_in.strip(),
