@@ -63,7 +63,9 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
-
+# Credit information
+st.sidebar.markdown("---")
+st.sidebar.caption("Created by HV Martínez-Tejada @nanomof.com.co")
 # =============================================================================
 # UTILIDADES GENERALES
 # =============================================================================
@@ -2365,3 +2367,4 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
